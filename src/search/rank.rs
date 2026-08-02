@@ -1820,6 +1820,78 @@ mod tests {
     }
 
     #[test]
+    fn case_study_body_words_do_not_turn_a_generic_title_into_an_anchor() {
+        let raw = vec![
+            raw_with_title(
+                "https://overview.example/builds",
+                "Bazel Nix and Pants build-system overview",
+                "A feature comparison of three build systems.",
+            ),
+            raw_with_title(
+                "https://generic.example/hermetic",
+                "Hermetic builds for polyglot monorepos",
+                "General advice for hermetic build configuration.",
+            ),
+            raw_with_title(
+                "https://index.example/case-studies",
+                "Build engineering resources",
+                "An index containing production migration case study links.",
+            ),
+        ];
+        let chunks = one_chunk_per_document(&raw);
+        let query = "Bazel Nix Pants polyglot monorepo case studies";
+
+        let selected = select_documents(
+            query,
+            &raw,
+            &chunks,
+            &[(0, 0.90), (1, 0.87), (2, 0.84)],
+            2,
+            &query_evidence(query, &raw),
+            &NumericConsensus::new(query, &raw),
+        )
+        .unwrap();
+
+        assert_eq!(selected, [0, 1]);
+    }
+
+    #[test]
+    fn research_queries_reserve_one_close_scholarly_source() {
+        let raw = vec![
+            raw_with_title(
+                "https://overview.example/reproducibility",
+                "Reproducible machine learning overview",
+                "A broad introduction.",
+            ),
+            raw_with_title(
+                "https://blog.example/numerics",
+                "Numerical reproducibility techniques",
+                "A practical blog post.",
+            ),
+            raw_with_title(
+                "https://arxiv.org/abs/2601.12345",
+                "Measuring numerical reproducibility across accelerators",
+                "A controlled evaluation of CPU and GPU inference drift.",
+            ),
+        ];
+        let chunks = one_chunk_per_document(&raw);
+        let query = "research paper numerical reproducibility CPU GPU";
+
+        let selected = select_documents(
+            query,
+            &raw,
+            &chunks,
+            &[(0, 0.90), (1, 0.87), (2, 0.82)],
+            2,
+            &query_evidence(query, &raw),
+            &NumericConsensus::new(query, &raw),
+        )
+        .unwrap();
+
+        assert_eq!(selected, [0, 2]);
+    }
+
+    #[test]
     fn close_same_source_subjects_yield_to_an_independent_result() {
         let raw = vec![
             raw_with_title(
