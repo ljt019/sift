@@ -16,7 +16,6 @@ pub struct RankedDocument {
     pub raw: Raw,
     pub content: String,
     pub truncated: bool,
-    pub score: f32,
 }
 
 pub async fn select(
@@ -200,52 +199,63 @@ fn select_scored(
     });
 
     let mut selected = HashMap::<usize, Vec<(usize, f32)>>::new();
+    let mut best_by_document = HashMap::<usize, (usize, f32)>::new();
+    for &(chunk_index, score) in &scored {
+        let document = chunks[chunk_index].document;
+        best_by_document
+            .entry(document)
+            .or_insert((chunk_index, score));
+    }
+    let mut best_by_document = best_by_document.into_values().collect::<Vec<_>>();
+    best_by_document.sort_by(|(left_index, left_score), (right_index, right_score)| {
+        right_score.total_cmp(left_score).then_with(|| {
+            chunks[*left_index]
+                .document
+                .cmp(&chunks[*right_index].document)
+        })
+    });
+    for (chunk_index, score) in best_by_document.into_iter().take(max_chunks) {
+        selected
+            .entry(chunks[chunk_index].document)
+            .or_default()
+            .push((chunk_index, score));
+    }
+
     for (chunk_index, score) in scored {
+        if selected.values().map(Vec::len).sum::<usize>() >= max_chunks {
+            break;
+        }
         let document = chunks[chunk_index].document;
         let document_chunks = selected.entry(document).or_default();
-        if document_chunks.len() == max_chunks_per_document {
+        if document_chunks.len() == max_chunks_per_document
+            || document_chunks
+                .iter()
+                .any(|(selected_index, _)| *selected_index == chunk_index)
+        {
             continue;
         }
         document_chunks.push((chunk_index, score));
-        if selected.values().map(Vec::len).sum::<usize>() == max_chunks {
-            break;
-        }
     }
 
-    let mut ranked = raw
+    let ranked = raw
         .into_iter()
         .enumerate()
         .filter_map(|(document, raw)| {
             let selected = selected.remove(&document)?;
-            let score = selected
-                .iter()
-                .map(|(_, score)| *score)
-                .max_by(f32::total_cmp)
-                .expect("selected document has at least one chunk");
             let selected_chunks = selected
                 .iter()
                 .map(|(index, _)| &chunks[*index])
                 .collect::<Vec<_>>();
             let assembled = chunk::assemble(&raw.content, &selected_chunks);
-            Some((
-                document,
-                RankedDocument {
-                    raw,
-                    content: assembled.content,
-                    truncated: assembled.truncated,
-                    score,
-                },
-            ))
+            Some(RankedDocument {
+                raw,
+                content: assembled.content,
+                truncated: assembled.truncated,
+            })
         })
         .collect::<Vec<_>>();
 
-    ranked.sort_by(|(left_index, left), (right_index, right)| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left_index.cmp(right_index))
-    });
-    Ok(ranked.into_iter().map(|(_, document)| document).collect())
+    Ok(ranked)
 }
 
 #[cfg(test)]
@@ -345,5 +355,93 @@ mod tests {
             chunks.iter().map(|chunk| chunk.ordinal).collect::<Vec<_>>(),
             [0, 4, 9]
         );
+    }
+
+    #[test]
+    fn selection_reserves_one_chunk_per_document() {
+        let raw = vec![
+            raw("https://example.com/a", "aaaa"),
+            raw("https://example.com/b", "bbbb"),
+            raw("https://example.com/c", "cccc"),
+        ];
+        let chunks = vec![
+            Chunk {
+                document: 0,
+                ordinal: 0,
+                start: 0,
+                end: 2,
+                tokens: 2,
+                text: "aa".into(),
+            },
+            Chunk {
+                document: 0,
+                ordinal: 1,
+                start: 2,
+                end: 4,
+                tokens: 2,
+                text: "aa".into(),
+            },
+            Chunk {
+                document: 1,
+                ordinal: 0,
+                start: 0,
+                end: 4,
+                tokens: 4,
+                text: "bbbb".into(),
+            },
+            Chunk {
+                document: 2,
+                ordinal: 0,
+                start: 0,
+                end: 4,
+                tokens: 4,
+                text: "cccc".into(),
+            },
+        ];
+
+        let ranked = select_scored(
+            raw,
+            chunks,
+            vec![(0, 0.9), (1, 0.8), (2, 0.7), (3, 0.6)],
+            3,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].raw.hit.url.as_str(), "https://example.com/a");
+        assert_eq!(ranked[1].raw.hit.url.as_str(), "https://example.com/b");
+        assert_eq!(ranked[2].raw.hit.url.as_str(), "https://example.com/c");
+    }
+
+    #[test]
+    fn chunk_scores_do_not_reorder_search_results() {
+        let raw = vec![
+            raw("https://example.com/first", "first"),
+            raw("https://example.com/second", "second"),
+        ];
+        let chunks = vec![
+            Chunk {
+                document: 0,
+                ordinal: 0,
+                start: 0,
+                end: 5,
+                tokens: 1,
+                text: "first".into(),
+            },
+            Chunk {
+                document: 1,
+                ordinal: 0,
+                start: 0,
+                end: 6,
+                tokens: 1,
+                text: "second".into(),
+            },
+        ];
+
+        let ranked = select_scored(raw, chunks, vec![(0, 0.1), (1, 0.9)], 2, 1).unwrap();
+
+        assert_eq!(ranked[0].raw.hit.url.as_str(), "https://example.com/first");
+        assert_eq!(ranked[1].raw.hit.url.as_str(), "https://example.com/second");
     }
 }

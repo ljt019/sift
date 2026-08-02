@@ -15,7 +15,7 @@ pub use types::{Dependency, HealthResponse, Status};
 
 /// Outer backstop only. Dependency-specific budgets are enforced closer to
 /// their operations; this exists so a hung request can't leak a connection.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub fn build(state: AppState) -> Router {
     Router::new()

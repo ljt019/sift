@@ -1,0 +1,18 @@
+# Extended from SearXNG's default container template. The entrypoint replaces
+# ultrasecretkey with a random value when it initializes a new config volume.
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "ultrasecretkey"
+  image_proxy: true
+
+engines:
+  - name: bing
+    disabled: false
+  - name: yep
+    disabled: false

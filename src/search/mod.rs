@@ -1,9 +1,11 @@
 mod budget;
 mod cache;
+mod candidate;
 mod chunk;
 mod debug;
 mod extract;
 mod fetch;
+mod github;
 mod rank;
 mod searxng;
 mod stackexchange;
@@ -13,7 +15,7 @@ use tokio::task::JoinSet;
 
 use crate::state::AppState;
 
-pub(crate) use cache::PageCache;
+pub(crate) use cache::{PageCache, SearchCache};
 pub(crate) use fetch::PublicDnsResolver;
 pub use searxng::Hit;
 pub(crate) use stackexchange::StackExchangeClient;
@@ -47,8 +49,54 @@ struct Raw {
     from_snippet: bool,
 }
 
+fn exact_identifier_query(query: &str) -> Option<String> {
+    let words = query.split_whitespace().collect::<Vec<_>>();
+    let (index, identifier) = words.iter().enumerate().find_map(|(index, word)| {
+        let token = word.trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '_' && character != ':'
+        });
+        (token.contains('_') || token.contains("::")).then_some((index, token))
+    })?;
+    let companion = (!identifier.contains("::"))
+        .then(|| {
+            words[index + 1..]
+                .iter()
+                .chain(words[..index].iter().rev())
+                .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()))
+                .find(|word| {
+                    word.len() >= 3
+                        && !matches!(
+                            word.to_ascii_lowercase().as_str(),
+                            "and"
+                                | "error"
+                                | "for"
+                                | "from"
+                                | "import"
+                                | "into"
+                                | "rust"
+                                | "the"
+                                | "using"
+                                | "with"
+                        )
+                })
+        })
+        .flatten();
+
+    Some(match companion {
+        Some(companion) => format!("\"{identifier}\" {companion}"),
+        None => format!("\"{identifier}\""),
+    })
+}
+
 pub async fn run(state: &AppState, query: &str, params: &Params) -> crate::Result<Vec<Document>> {
-    let hits = searxng::search(state, query, params.num_results).await?;
+    let candidate_limit = (params.num_results * 4).clamp(params.num_results, 32);
+    let hits = searxng::search(state, query, candidate_limit).await?;
+    let hits = match &state.embeddings {
+        Some(embeddings) => candidate::select(embeddings, query, hits, params.num_results)
+            .await
+            .context("failed to select search candidates")?,
+        None => hits.into_iter().take(params.num_results).collect(),
+    };
     let stackexchange_urls = hits
         .iter()
         .enumerate()
@@ -111,6 +159,23 @@ async fn resolve(state: &AppState, hit: Hit, specialized_content: Option<&str>) 
         return choose_content(hit, Some(content.to_owned()));
     }
 
+    if stackexchange::recognizes(&hit.url)
+        && let Some(printer_url) = stackexchange::printer_url(&hit.url)
+    {
+        let extracted = state
+            .page_cache
+            .get_or_extract(&printer_url, || async {
+                fetch_and_extract(state, &printer_url)
+                    .await
+                    .filter(|content| !stackexchange::printer_unavailable(content))
+            })
+            .await
+            .map(|content| content.to_string());
+        if extracted.is_some() {
+            return choose_content(hit, extracted);
+        }
+    }
+
     let url = hit.url.clone();
     let extracted = state
         .page_cache
@@ -123,7 +188,7 @@ async fn resolve(state: &AppState, hit: Hit, specialized_content: Option<&str>) 
 
 async fn fetch_and_extract(state: &AppState, url: &url::Url) -> Option<String> {
     match fetch::get(state, url).await {
-        Ok(html) => {
+        Ok(fetch::Page::Html(html)) => {
             let debug_html = state.config.sift_debug_dir.is_some().then(|| html.clone());
             let extracted = extract_bounded(state, html, url.clone()).await;
             debug::capture(
@@ -135,6 +200,19 @@ async fn fetch_and_extract(state: &AppState, url: &url::Url) -> Option<String> {
             .await;
             extracted
         }
+        Ok(fetch::Page::Text(text)) => {
+            let extracted = text.trim();
+            let extracted = (!extracted.is_empty()).then(|| extracted.to_owned());
+            debug::capture(
+                state.config.sift_debug_dir.as_deref(),
+                url,
+                &text,
+                extracted.as_deref().unwrap_or_default(),
+            )
+            .await;
+            extracted
+        }
+        Ok(fetch::Page::Pdf(pdf)) => extract_pdf_bounded(state, pdf, url.clone()).await,
         Err(error) => {
             let failure = error.diagnostic();
             tracing::debug!(
@@ -202,6 +280,39 @@ async fn extract_bounded(state: &AppState, html: String, url: url::Url) -> Optio
         }
         Err(error) => {
             tracing::error!(url = %url, error = ?error, "page extraction task failed; using snippet");
+            None
+        }
+    }
+}
+
+async fn extract_pdf_bounded(state: &AppState, pdf: Vec<u8>, url: url::Url) -> Option<String> {
+    let permit = match state.extract_permits.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(error) => {
+            tracing::error!(error = %error, "extraction semaphore closed; using snippet");
+            return None;
+        }
+    };
+    let extraction = tokio::task::spawn_blocking(move || {
+        // PDF parsing is CPU-bound and shares the same bounded pool as HTML
+        // extraction. A parser panic remains contained to this task.
+        let _permit = permit;
+        pdf_extract::extract_text_from_mem(&pdf)
+    })
+    .await;
+
+    match extraction {
+        Ok(Ok(content)) if !content.trim().is_empty() => Some(content.trim().to_owned()),
+        Ok(Ok(_)) => {
+            tracing::debug!(url = %url, "PDF extractor returned no content; using snippet");
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(url = %url, error = ?error, "PDF extraction failed; using snippet");
+            None
+        }
+        Err(error) => {
+            tracing::error!(url = %url, error = ?error, "PDF extraction task failed; using snippet");
             None
         }
     }

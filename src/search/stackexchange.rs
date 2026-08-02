@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::Instant;
 use url::Url;
 
 const API_BASE: &str = "https://api.stackexchange.com/2.3";
@@ -139,9 +139,13 @@ impl StackExchangeClient {
             return Ok(());
         }
 
+        let now = Instant::now();
         let next_request = self.state.lock().await.next_request;
-        if next_request > Instant::now() {
-            sleep_until(next_request).await;
+        if next_request > now {
+            bail!(
+                "Stack Exchange API is backed off for {} more seconds",
+                next_request.duration_since(now).as_secs()
+            );
         }
 
         let ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(";");
@@ -151,16 +155,33 @@ impl StackExchangeClient {
             .query(&[("site", site), ("filter", API_FILTER)])
             .timeout(REQUEST_TIMEOUT);
         if let Some(api_key) = &self.api_key {
-            request = request.bearer_auth(api_key);
+            request = request.query(&[("key", api_key)]);
         }
 
         let response = request
             .send()
             .await
-            .context("failed to call Stack Exchange API")?
-            .error_for_status()
-            .context("Stack Exchange API returned an error")?;
+            .context("failed to call Stack Exchange API")?;
+        let status = response.status();
         let body = read_limited(response).await?;
+        if !status.is_success() {
+            let error = serde_json::from_slice::<ApiError>(&body).ok();
+            if error
+                .as_ref()
+                .is_some_and(|error| error.error_name == "throttle_violation")
+            {
+                let retry_after = error
+                    .as_ref()
+                    .and_then(|error| retry_after_seconds(&error.error_message))
+                    .unwrap_or(15 * 60);
+                self.state.lock().await.next_request =
+                    Instant::now() + Duration::from_secs(retry_after);
+            }
+            let message = error
+                .map(|error| error.error_message)
+                .unwrap_or_else(|| "unknown API error".to_owned());
+            bail!("Stack Exchange API returned {status}: {message}");
+        }
         let mut response: ApiResponse =
             serde_json::from_slice(&body).context("invalid Stack Exchange API response")?;
 
@@ -211,6 +232,40 @@ impl StackExchangeClient {
         }
         Ok(())
     }
+}
+
+pub(super) fn printer_url(url: &Url) -> Option<Url> {
+    let question = question_ref(url)?;
+    let service = printer_service(url.host_str()?)?;
+    let mut printer = Url::parse("https://www.stackprinter.com/export").expect("valid literal");
+    printer
+        .query_pairs_mut()
+        .append_pair("question", &question.id.to_string())
+        .append_pair("service", &service)
+        .append_pair("language", "en")
+        .append_pair("hideAnswers", "false")
+        .append_pair("showAll", "true")
+        .append_pair("width", "640");
+    Some(printer)
+}
+
+pub(super) fn printer_unavailable(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("the stackexchange server is too busy")
+        || lower.contains("please try again later")
+        || lower.contains("too many requests")
+        || lower.contains("for the love it bears to fair maidens")
+        || lower.contains("stackprinter - the stack exchange printer suite")
+}
+
+fn retry_after_seconds(message: &str) -> Option<u64> {
+    message
+        .split_once("more requests available in ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub(super) fn recognizes(url: &Url) -> bool {
@@ -272,6 +327,29 @@ fn api_site(host: &str) -> Option<String> {
         _ => return None,
     };
     Some(site)
+}
+
+fn printer_service(host: &str) -> Option<String> {
+    let normalized = host.to_ascii_lowercase();
+    let host = normalized.strip_prefix("www.").unwrap_or(&normalized);
+
+    match host {
+        "stackoverflow.com" => Some("stackoverflow".into()),
+        "serverfault.com" => Some("serverfault".into()),
+        "superuser.com" => Some("superuser".into()),
+        "askubuntu.com" => Some("askubuntu".into()),
+        "mathoverflow.net" => Some("mathoverflow".into()),
+        "stackapps.com" => Some("stackapps".into()),
+        _ if host.ends_with(".stackexchange.com") => host
+            .strip_suffix(".com")
+            .filter(|service| !service.is_empty())
+            .map(str::to_owned),
+        _ if host.ends_with(".stackoverflow.com") => host
+            .strip_suffix(".com")
+            .filter(|service| !service.is_empty())
+            .map(str::to_owned),
+        _ => None,
+    }
 }
 
 fn render_question(question: &mut ApiQuestion) -> String {
@@ -359,6 +437,12 @@ struct ApiResponse {
 }
 
 #[derive(Deserialize)]
+struct ApiError {
+    error_name: String,
+    error_message: String,
+}
+
+#[derive(Deserialize)]
 struct ApiQuestion {
     question_id: u64,
     title: String,
@@ -423,6 +507,31 @@ mod tests {
         );
         assert!(
             question_ref(&Url::parse("https://example.com/questions/1/nope").unwrap()).is_none()
+        );
+
+        let printer = printer_url(
+            &Url::parse("https://unix.stackexchange.com/questions/67890/example").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(printer.host_str(), Some("www.stackprinter.com"));
+        assert!(printer.as_str().contains("question=67890"));
+        assert!(printer.as_str().contains("service=unix.stackexchange"));
+    }
+
+    #[test]
+    fn recognizes_stackprinter_failures_and_api_retry_windows() {
+        assert!(printer_unavailable(
+            "The StackExchange server is too busy at the moment. Please try again later."
+        ));
+        assert!(printer_unavailable(
+            "..for the love it bears to fair maidens forgets its ferocity and wildness.. too many requests from this app/user pair"
+        ));
+        assert!(!printer_unavailable("# Useful question\n\nAccepted answer"));
+        assert_eq!(
+            retry_after_seconds(
+                "too many requests from this IP, more requests available in 47924 seconds"
+            ),
+            Some(47_924)
         );
     }
 
