@@ -31,8 +31,12 @@ Always run formatting and focused unit tests for touched code:
 
 ```console
 cargo fmt --all -- --check
-cargo test --workspace --lib
+cargo clippy --workspace --exclude sift-embedding-kernels --all-targets -- -D warnings
+cargo test --workspace --exclude sift-embedding-kernels --lib
 ```
+
+The CUDA kernel crate requires a toolkit even for direct workspace checks; the
+production Docker build is its compile gate.
 
 Run `test_embedding_gemma` in release mode when a change can affect
 tokenization, prompts, truncation, batching, tensor operations, model output,

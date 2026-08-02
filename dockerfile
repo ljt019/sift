@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-ARG CUDA_VERSION=13.3.0
+ARG CUDA_VERSION=12.9.1
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS builder
 
+ARG CUDA_VERSION
 ARG RUST_VERSION=1.95.0
 
 ENV CUDA_ROOT=/usr/local/cuda \
@@ -26,8 +27,9 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/build/target \
+    CARGO_TARGET_DIR="/build/target/cuda-${CUDA_VERSION}" \
     cargo build --locked --release --features cuda --bin sift \
-    && cp target/release/sift /usr/local/bin/sift
+    && cp "/build/target/cuda-${CUDA_VERSION}/release/sift" /usr/local/bin/sift
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS runtime
 

@@ -266,7 +266,7 @@ impl Tensor {
         }
 
         let storage = self.storage().matmul(
-            &rhs.storage(),
+            rhs.storage(),
             (batching, m, n, k),
             self.layout(),
             rhs.layout(),
@@ -285,12 +285,9 @@ impl Tensor {
             }
             .bt())?,
         };
-        let storage = self.storage().index_select(
-            &indexes.storage(),
-            self.layout(),
-            indexes.layout(),
-            dim,
-        )?;
+        let storage =
+            self.storage()
+                .index_select(indexes.storage(), self.layout(), indexes.layout(), dim)?;
         let mut dims = self.dims().to_vec();
         dims[dim] = indexes_len;
         Ok(from_storage(storage, dims))
@@ -317,7 +314,7 @@ impl Tensor {
             };
             Ok::<Vec<_>, Error>(data)
         };
-        match &*self.storage() {
+        match self.storage() {
             Storage::Cpu(storage) => from_cpu_storage(storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
         }

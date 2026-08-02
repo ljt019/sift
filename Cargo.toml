@@ -1,3 +1,10 @@
+[workspace]
+members = [
+    "crates/sift-embedding-kernels",
+    "crates/sift-embedding-runtime",
+]
+resolver = "3"
+
 [package]
 name = "sift"
 version = "0.1.0"

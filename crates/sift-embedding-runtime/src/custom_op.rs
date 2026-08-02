@@ -55,9 +55,9 @@ impl Tensor {
     ) -> Result<Self> {
         let (storage, shape) = self.storage().apply_op3(
             self.layout(),
-            &second.storage(),
+            second.storage(),
             second.layout(),
-            &third.storage(),
+            third.storage(),
             third.layout(),
             operation,
         )?;

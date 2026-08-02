@@ -17,8 +17,9 @@ the gated `google/embeddinggemma-300m` model.
 cp .env.example .env
 ```
 
-To use the bundled SearXNG set `COMPOSE_PROFILES` to `bundled`.
-If SearXNG is already deployed elsewhere, just set `SEARXNG_URL` to its address.
+To use the bundled SearXNG, keep `COMPOSE_PROFILES=bundled`.
+If SearXNG is already deployed elsewhere, remove `COMPOSE_PROFILES` and set
+`SEARXNG_URL` to its address.
 
 ```console
 docker compose up --build
@@ -43,6 +44,10 @@ curl http://localhost:8099/search \
 `contextMaxCharacters` defaults to 24,000 and may be between 1 and 100,000.
 
 Health is available at `GET /health`.
+
+## Performance 
+
+<--Performance Matrix Here-->
 
 ## License
 
