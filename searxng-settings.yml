@@ -10,6 +10,8 @@ use_default_settings:
       - yep
       - brave
       - duckduckgo web
+      - mojeek
+      - mwmbl
       - startpage
       # Coding verticals.
       - arch linux wiki
@@ -19,6 +21,7 @@ use_default_settings:
       - lib.rs
       - mdn
       - nixos wiki
+      - npm
       - pypi
       # Research, news, and local discovery.
       - arxiv
@@ -57,6 +60,10 @@ engines:
     disabled: false
   - name: duckduckgo web
     disabled: false
+  - name: mojeek
+    disabled: false
+  - name: mwmbl
+    disabled: false
   - name: startpage
     disabled: false
   - name: yep
@@ -74,6 +81,8 @@ engines:
   - name: mdn
     disabled: false
   - name: nixos wiki
+    disabled: false
+  - name: npm
     disabled: false
   - name: pypi
     disabled: false
