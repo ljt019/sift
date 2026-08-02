@@ -13,6 +13,17 @@ pub(super) fn has_numerical_parity_intent(query: &str) -> bool {
         && (terms.contains("numerical") || terms.contains("tolerance"))
 }
 
+pub(super) fn has_machine_learning_inference_intent(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    lower.contains("inference")
+        && (lower.contains("machine-learning")
+            || lower.contains("machine learning")
+            || lower.contains("deep learning")
+            || lower.contains("neural")
+            || lower.contains("model")
+            || lower.contains("llm"))
+}
+
 /// Whether the request calls for research-grade source material rather than
 /// merely using the word "study" as part of an operational case-study query.
 pub(super) fn has_research_source_intent(query: &str) -> bool {
@@ -558,6 +569,22 @@ mod tests {
             "Bazel Nix Pants tradeoffs case studies"
         ));
         assert!(!has_research_source_intent("CUDA kernel validation guide"));
+    }
+
+    #[test]
+    fn machine_learning_inference_intent_requires_both_axes() {
+        assert!(has_machine_learning_inference_intent(
+            "port machine-learning inference from CPU to CUDA"
+        ));
+        assert!(has_machine_learning_inference_intent(
+            "neural network inference reproducibility"
+        ));
+        assert!(!has_machine_learning_inference_intent(
+            "CPU and GPU fluid-solver reproducibility"
+        ));
+        assert!(!has_machine_learning_inference_intent(
+            "train a deep learning model"
+        ));
     }
 
     #[test]

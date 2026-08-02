@@ -7,7 +7,8 @@ use url::Url;
 
 use super::cache::SearchOutcome;
 use super::evidence::{
-    has_case_study_intent, has_full_text_intent, has_numerical_parity_intent, is_as_of_query,
+    has_case_study_intent, has_full_text_intent, has_machine_learning_inference_intent,
+    has_numerical_parity_intent, is_as_of_query,
 };
 use super::exact_identifier_query;
 use crate::error::{AppError, Result};
@@ -346,7 +347,7 @@ async fn request_target(
     let mut contributors = body
         .results
         .iter()
-        .flat_map(|result| result.engines.iter().map(String::as_str))
+        .flat_map(|result| result.engines.iter().cloned())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -359,6 +360,19 @@ async fn request_target(
         unresponsive = ?body.unresponsive_engines,
         "received SearXNG response"
     );
+    let target_label = match target {
+        SearchTarget::Categories(categories) => format!("categories:{categories}"),
+        SearchTarget::Engines(engines) => format!("engines:{engines}"),
+    };
+    super::debug::capture_search_response(
+        state.config.sift_debug_dir.as_deref(),
+        query,
+        &target_label,
+        body.results.len(),
+        &contributors,
+        &body.unresponsive_engines,
+    )
+    .await;
     // SearXNG score-sorts results, then rearranges them into UI-oriented
     // category/template blocks. Its JSON endpoint preserves that presentation
     // order, so restore the relevance order before Sift truncates candidates.
@@ -501,6 +515,29 @@ fn supplemental_queries(
             .cloned()
     {
         return vec![SupplementalQuery::Specialist(specialist)];
+    }
+
+    if has_numerical_parity_intent(query)
+        && has_machine_learning_inference_intent(query)
+        && !has_scholarly_intent(query)
+        && let Some(specialist) = route
+            .supplemental
+            .as_ref()
+            .filter(|specialist| has_category(&specialist.categories, "science"))
+            .cloned()
+    {
+        // One title-oriented query retrieves work on bit-level reproducible
+        // inference; the complementary formulation retrieves empirical
+        // studies of hardware-induced numerical deviations. These are
+        // disjoint evidence forms in scholarly APIs, and neither formulation
+        // reliably returns the other.
+        return vec![
+            SupplementalQuery::Specialist(specialist),
+            SupplementalQuery::Specialist(SpecialistQuery {
+                query: "numerical deviations neural network inference reproducibility".into(),
+                categories: "science".into(),
+            }),
+        ];
     }
 
     if let Some(query) = focused_recommendation_query(query) {
@@ -812,24 +849,42 @@ fn focused_case_study_query(query: &str) -> String {
 }
 
 fn focused_numerical_parity_query(query: &str) -> String {
-    let mut terms = query
+    let query_terms = query
         .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<HashSet<_>>();
+    let machine_learning = query_terms.contains("inference")
+        || query_terms.contains("model")
+        || query_terms.contains("models")
+        || query_terms.contains("neural")
+        || query_terms.contains("llm")
+        || query_terms.contains("machine") && query_terms.contains("learning");
+    let bitwise = query_terms.contains("bitwise") || query_terms.contains("bit");
+    if machine_learning && bitwise {
+        // Academic APIs rank title matches aggressively. This compact,
+        // corpus-native formulation finds work on bit-level reproducible
+        // training/inference; appending every concrete backend term instead
+        // turns the lookup into an unrelated hardware-optimization search.
+        return "bitwise reproducible deep learning inference".into();
+    }
+
+    if machine_learning {
+        return "numerical deviations neural network inference reproducibility".into();
+    }
+
+    let mut terms = query_terms
+        .iter()
         .filter(|term| {
             matches!(
-                term.to_ascii_lowercase().as_str(),
+                term.as_str(),
                 "cpu" | "cuda" | "gpu" | "metal" | "mps" | "opencl" | "rocm" | "tpu"
             )
         })
-        .take(4)
+        .map(String::as_str)
         .collect::<Vec<_>>();
-    deduplicate_case_insensitive(&mut terms);
-    if query
-        .split(|character: char| !character.is_alphanumeric())
-        .any(|term| term.eq_ignore_ascii_case("inference"))
-    {
-        terms.push("inference");
-    }
-    terms.extend(["cross-backend", "numerical", "reproducibility", "testing"]);
+    terms.sort_unstable();
+    terms.extend(["numerical", "reproducibility", "testing"]);
     terms.join(" ")
 }
 
@@ -3821,7 +3876,7 @@ mod tests {
             )
             .supplemental,
             Some(SpecialistQuery {
-                query: "CPU CUDA inference cross-backend numerical reproducibility testing".into(),
+                query: "bitwise reproducible deep learning inference".into(),
                 categories: "science".into(),
             })
         );
@@ -3846,6 +3901,42 @@ mod tests {
                 "reproducible hermetic builds in large polyglot monorepos Bazel Nix Pants tradeoffs case studies"
             ),
             "(Bazel OR Nix OR Pants) monorepo (migration OR \"case study\" OR postmortem)"
+        );
+    }
+
+    #[test]
+    fn numerical_parity_focus_uses_terms_native_to_the_evidence_corpus() {
+        assert_eq!(
+            focused_numerical_parity_query(
+                "detect silent drift in bitwise CPU to CUDA machine-learning inference"
+            ),
+            "bitwise reproducible deep learning inference"
+        );
+        assert_eq!(
+            focused_numerical_parity_query(
+                "compare neural network inference numerical deviations across GPU backends"
+            ),
+            "numerical deviations neural network inference reproducibility"
+        );
+        assert_eq!(
+            focused_numerical_parity_query("CUDA CPU kernel numerical parity testing"),
+            "cpu cuda numerical reproducibility testing"
+        );
+
+        let query = "detect silent numerical drift porting machine-learning inference from CPU to CUDA bitwise reproducibility tolerance testing";
+        let route = route(query, "general,it,science");
+        assert_eq!(
+            supplemental_queries(query, &route, &[], "general,it,science"),
+            vec![
+                SupplementalQuery::Specialist(SpecialistQuery {
+                    query: "bitwise reproducible deep learning inference".into(),
+                    categories: "science".into(),
+                }),
+                SupplementalQuery::Specialist(SpecialistQuery {
+                    query: "numerical deviations neural network inference reproducibility".into(),
+                    categories: "science".into(),
+                }),
+            ]
         );
     }
 
