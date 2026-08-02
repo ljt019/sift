@@ -1,5 +1,5 @@
 use anyhow::Result;
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use sift::embeddings::EmbeddingBackend;
 use sift::embeddings::EmbeddingGemma;
 use sift::embeddings::EmbeddingWorker;
@@ -8,6 +8,30 @@ use sift::embeddings::EmbeddingWorker;
 mod fixtures;
 
 use fixtures::{EmbeddingGemmaGoldens, GoldenEmbedding, golden_by_name};
+
+#[derive(Clone, Copy)]
+struct ErrorBounds {
+    max_absolute: f32,
+    root_mean_square: f32,
+}
+
+const PORTABLE_BOUNDS: ErrorBounds = ErrorBounds {
+    max_absolute: 3e-7,
+    root_mean_square: 1e-7,
+};
+const LONG_CONTEXT_BOUNDS: ErrorBounds = ErrorBounds {
+    max_absolute: 2e-6,
+    root_mean_square: 1e-6,
+};
+#[cfg(feature = "rocm")]
+const ROCM_BOUNDS: ErrorBounds = ErrorBounds {
+    max_absolute: 1e-6,
+    root_mean_square: 2e-7,
+};
+const BATCH_VARIANT_BOUNDS: ErrorBounds = ErrorBounds {
+    max_absolute: 1e-6,
+    root_mean_square: 3e-7,
+};
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     assert_eq!(left.len(), right.len());
@@ -19,7 +43,7 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     dot_product / (left_norm * right_norm)
 }
 
-fn assert_matches_golden(actual: &[f32], golden: &GoldenEmbedding) {
+fn error_metrics(actual: &[f32], golden: &GoldenEmbedding) -> (f32, f32, f32) {
     let similarity = cosine_similarity(actual, &golden.embedding);
     let (max_absolute_error, squared_error) = actual.iter().zip(&golden.embedding).fold(
         (0.0f32, 0.0f32),
@@ -29,52 +53,78 @@ fn assert_matches_golden(actual: &[f32], golden: &GoldenEmbedding) {
         },
     );
     let root_mean_square_error = (squared_error / actual.len() as f32).sqrt();
+    (similarity, max_absolute_error, root_mean_square_error)
+}
+
+fn assert_matches_golden(actual: &[f32], golden: &GoldenEmbedding, bounds: ErrorBounds) {
+    let (similarity, max_absolute_error, root_mean_square_error) = error_metrics(actual, golden);
     assert!(
-        similarity > 0.999_999_5 && max_absolute_error < 3e-7 && root_mean_square_error < 1e-7,
+        similarity > 0.999_999_5
+            && max_absolute_error < bounds.max_absolute
+            && root_mean_square_error < bounds.root_mean_square,
         "{} differed from its golden: cosine={similarity}, max_abs={max_absolute_error:e}, \
          rmse={root_mean_square_error:e}",
         golden.name,
     );
 }
 
-fn assert_model_matches_goldens(model: &EmbeddingGemma) -> Result<()> {
+fn assert_model_matches_reference_batches(
+    model: &EmbeddingGemma,
+    backend: &str,
+    bounds: ErrorBounds,
+) -> Result<()> {
     let goldens = EmbeddingGemmaGoldens::load();
-    let query_rust = golden_by_name(&goldens.queries_768, "rust_json");
-    let query_france = golden_by_name(&goldens.queries_768, "capital_of_france");
-    let rust = golden_by_name(&goldens.documents_768, "serde_json");
-    let france = golden_by_name(&goldens.documents_768, "paris");
+    let mut minimum_cosine = f32::INFINITY;
+    let mut maximum_absolute = 0.0_f32;
+    let mut maximum_rmse = 0.0_f32;
 
-    let queries = model.embed_queries(&[&query_rust.text, &query_france.text], 768)?;
-    assert_eq!(queries.len(), 2);
-    assert_matches_golden(&queries[0], query_rust);
-    assert_matches_golden(&queries[1], query_france);
+    let mut check = |actual: &[f32], golden: &GoldenEmbedding| {
+        let (cosine, max_absolute, rmse) = error_metrics(actual, golden);
+        minimum_cosine = minimum_cosine.min(cosine);
+        maximum_absolute = maximum_absolute.max(max_absolute);
+        maximum_rmse = maximum_rmse.max(rmse);
+        let case_bounds = if golden.name == "over_context_window" {
+            LONG_CONTEXT_BOUNDS
+        } else {
+            bounds
+        };
+        assert_matches_golden(actual, golden, case_bounds);
+    };
 
-    let documents = model.embed_documents(&[&rust.text, &france.text, &rust.text], 768)?;
-    assert_eq!(documents.len(), 3);
-    assert_matches_golden(&documents[0], rust);
-    assert_matches_golden(&documents[1], france);
-    assert_matches_golden(&documents[2], rust);
-
-    let document_goldens_128 = goldens
-        .documents_128
-        .iter()
-        .filter(|golden| golden.name != "over_context_window")
-        .collect::<Vec<_>>();
-    let document_texts_128 = document_goldens_128
+    let query_texts = goldens
+        .queries_768
         .iter()
         .map(|golden| golden.text.as_str())
         .collect::<Vec<_>>();
-    let documents_128 = model.embed_documents(&document_texts_128, 128)?;
-    for (actual, golden) in documents_128.iter().zip(document_goldens_128) {
-        assert_matches_golden(actual, golden);
+    let queries = model.embed_queries(&query_texts, 768)?;
+    for (actual, golden) in queries.iter().zip(&goldens.queries_768) {
+        check(actual, golden);
     }
 
-    let single = model.embed_documents(&[&rust.text], 768)?;
-    assert_eq!(single.len(), 1);
-    assert_matches_golden(&single[0], rust);
-    assert!(cosine_similarity(&documents[0], &single[0]) > 0.999);
-    assert!(cosine_similarity(&documents[2], &single[0]) > 0.999);
+    let document_texts = goldens
+        .documents_768
+        .iter()
+        .map(|golden| golden.text.as_str())
+        .collect::<Vec<_>>();
+    let documents = model.embed_documents(&document_texts, 768)?;
+    for (actual, golden) in documents.iter().zip(&goldens.documents_768) {
+        check(actual, golden);
+    }
 
+    let document_texts = goldens
+        .documents_128
+        .iter()
+        .map(|golden| golden.text.as_str())
+        .collect::<Vec<_>>();
+    let documents = model.embed_documents(&document_texts, 128)?;
+    for (actual, golden) in documents.iter().zip(&goldens.documents_128) {
+        check(actual, golden);
+    }
+
+    println!(
+        "GOLDEN=PASS backend={backend} batches=reference min_cosine={minimum_cosine} \
+         max_abs={maximum_absolute:e} max_rmse={maximum_rmse:e}"
+    );
     Ok(())
 }
 
@@ -82,10 +132,14 @@ fn assert_model_matches_goldens(model: &EmbeddingGemma) -> Result<()> {
 async fn test_embedding_gemma() -> Result<()> {
     dotenvy::dotenv().ok();
 
-    assert_model_matches_goldens(&EmbeddingGemma::load()?)?;
+    assert_model_matches_reference_batches(&EmbeddingGemma::load()?, "cpu", PORTABLE_BOUNDS)?;
 
     #[cfg(feature = "cuda")]
-    assert_model_matches_goldens(&EmbeddingGemma::load_on(EmbeddingBackend::Cuda(0))?)?;
+    assert_model_matches_reference_batches(
+        &EmbeddingGemma::load_on(EmbeddingBackend::Cuda(0))?,
+        "cuda",
+        PORTABLE_BOUNDS,
+    )?;
 
     let goldens = EmbeddingGemmaGoldens::load();
     let query_rust = golden_by_name(&goldens.queries_768, "rust_json");
@@ -113,8 +167,8 @@ async fn test_embedding_gemma() -> Result<()> {
             768,
         )
         .await?;
-    assert_matches_golden(&queries[0], query_rust);
-    assert_matches_golden(&queries[1], query_france);
+    assert_matches_golden(&queries[0], query_rust, PORTABLE_BOUNDS);
+    assert_matches_golden(&queries[1], query_france, PORTABLE_BOUNDS);
 
     let documents = worker
         .embed_documents(
@@ -122,9 +176,17 @@ async fn test_embedding_gemma() -> Result<()> {
             768,
         )
         .await?;
-    assert_matches_golden(&documents[0], rust);
-    assert_matches_golden(&documents[1], france);
-    assert_matches_golden(&documents[2], rust);
+    assert_matches_golden(&documents[0], rust, BATCH_VARIANT_BOUNDS);
+    assert_matches_golden(&documents[1], france, BATCH_VARIANT_BOUNDS);
+    assert_matches_golden(&documents[2], rust, BATCH_VARIANT_BOUNDS);
 
     Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[tokio::test(flavor = "current_thread")]
+async fn test_embedding_gemma_rocm() -> Result<()> {
+    dotenvy::dotenv().ok();
+    let model = EmbeddingGemma::load_on(EmbeddingBackend::Rocm(0))?;
+    assert_model_matches_reference_batches(&model, "rocm", ROCM_BOUNDS)
 }

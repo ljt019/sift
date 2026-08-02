@@ -8,12 +8,14 @@ use crate::{DType, Result, Shape, Storage, WithDType};
 pub enum DeviceLocation {
     Cpu,
     Cuda { gpu_id: usize },
+    Rocm { gpu_id: usize },
 }
 
 #[derive(Debug, Clone)]
 pub enum Device {
     Cpu,
     Cuda(crate::CudaDevice),
+    Rocm(crate::RocmDevice),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,10 +29,15 @@ impl Device {
         Ok(Self::Cuda(crate::CudaDevice::new(ordinal)?))
     }
 
+    pub fn new_rocm(ordinal: usize) -> Result<Self> {
+        Ok(Self::Rocm(crate::RocmDevice::new(ordinal)?))
+    }
+
     pub fn location(&self) -> DeviceLocation {
         match self {
             Self::Cpu => DeviceLocation::Cpu,
             Self::Cuda(device) => device.location(),
+            Self::Rocm(device) => device.location(),
         }
     }
 
@@ -44,6 +51,13 @@ impl Device {
             }
             #[cfg(not(feature = "cuda"))]
             Self::Cuda(_) => Err(crate::Error::NotCompiledWithCudaSupport),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(device) => {
+                device.begin_memory_profile()?;
+                Ok(true)
+            }
+            #[cfg(not(feature = "rocm"))]
+            Self::Rocm(_) => Err(crate::Error::NotCompiledWithRocmSupport),
         }
     }
 
@@ -60,6 +74,16 @@ impl Device {
             }
             #[cfg(not(feature = "cuda"))]
             Self::Cuda(_) => Err(crate::Error::NotCompiledWithCudaSupport),
+            #[cfg(feature = "rocm")]
+            Self::Rocm(device) => {
+                let (free_bytes, peak_bytes) = device.end_memory_profile()?;
+                Ok(Some(MemoryProfile {
+                    free_bytes,
+                    peak_bytes,
+                }))
+            }
+            #[cfg(not(feature = "rocm"))]
+            Self::Rocm(_) => Err(crate::Error::NotCompiledWithRocmSupport),
         }
     }
 
@@ -72,6 +96,10 @@ impl Device {
             Device::Cuda(device) => {
                 let storage = device.zeros_impl(shape, dtype)?;
                 Ok(Storage::Cuda(storage))
+            }
+            Device::Rocm(device) => {
+                let storage = device.zeros_impl(shape, dtype)?;
+                Ok(Storage::Rocm(storage))
             }
         }
     }
@@ -86,6 +114,10 @@ impl Device {
                 let storage = device.alloc_uninit(shape, dtype)?;
                 Ok(Storage::Cuda(storage))
             }
+            Device::Rocm(device) => {
+                let storage = device.alloc_uninit(shape, dtype)?;
+                Ok(Storage::Rocm(storage))
+            }
         }
     }
 
@@ -95,6 +127,10 @@ impl Device {
             Device::Cuda(device) => {
                 let storage = device.storage_from_slice(data)?;
                 Ok(Storage::Cuda(storage))
+            }
+            Device::Rocm(device) => {
+                let storage = device.storage_from_slice(data)?;
+                Ok(Storage::Rocm(storage))
             }
         }
     }
@@ -106,6 +142,11 @@ impl Device {
                 let storage = S::to_cpu_storage_owned(data);
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Cuda(storage))
+            }
+            Device::Rocm(device) => {
+                let storage = S::to_cpu_storage_owned(data);
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Rocm(storage))
             }
         }
     }

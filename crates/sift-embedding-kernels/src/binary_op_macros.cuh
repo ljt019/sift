@@ -2,16 +2,16 @@
 
 #define BINARY_OP_OUT(TYPENAME, OUT_TYPENAME, FN_NAME, FUNC) \
 extern "C" __global__ void FN_NAME( \
-    const size_t numel, \
-    const size_t num_dims, \
-    const size_t *dims_and_strides, \
+    const sift_size_t numel, \
+    const sift_size_t num_dims, \
+    const sift_size_t *dims_and_strides, \
     const TYPENAME *lhs, \
     const TYPENAME *rhs, \
     OUT_TYPENAME *out \
 ) { \
-    const size_t *dims = dims_and_strides; \
-    const size_t *lhs_strides = dims_and_strides + 1 * num_dims; \
-    const size_t *rhs_strides = dims_and_strides + 2 * num_dims; \
+    const sift_size_t *dims = dims_and_strides; \
+    const sift_size_t *lhs_strides = dims_and_strides + 1 * num_dims; \
+    const sift_size_t *rhs_strides = dims_and_strides + 2 * num_dims; \
     bool lhs_cont = dims_and_strides == nullptr || is_contiguous(num_dims, dims, lhs_strides); \
     bool rhs_cont = dims_and_strides == nullptr || is_contiguous(num_dims, dims, rhs_strides); \
     if (lhs_cont && rhs_cont) { \

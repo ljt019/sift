@@ -19,6 +19,7 @@ test = false
 [features]
 default = []
 cuda = ["sift-embedding-runtime/cuda"]
+rocm = ["sift-embedding-runtime/rocm"]
 
 [dependencies]
 anyhow = "1.0.104"

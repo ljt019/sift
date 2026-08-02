@@ -12,6 +12,17 @@ const QUEUE_CAPACITY: usize = 32;
 pub struct EmbeddingWorker {
     sender: mpsc::Sender<Request>,
     tokenizer: Arc<EmbeddingTokenizer>,
+    _thread: Arc<WorkerThread>,
+}
+
+struct WorkerThread(std::sync::Mutex<Option<std::thread::JoinHandle<()>>>);
+
+impl Drop for WorkerThread {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.lock().unwrap().take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 enum InputKind {
@@ -31,7 +42,7 @@ impl EmbeddingWorker {
         let (sender, mut receiver) = mpsc::channel::<Request>(QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
 
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("sift-embeddings".into())
             .spawn(move || {
                 let model = match EmbeddingGemma::load_on(backend) {
@@ -91,6 +102,7 @@ impl EmbeddingWorker {
         Ok(Self {
             sender,
             tokenizer: Arc::new(tokenizer),
+            _thread: Arc::new(WorkerThread(std::sync::Mutex::new(Some(thread)))),
         })
     }
 

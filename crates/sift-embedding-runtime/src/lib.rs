@@ -10,6 +10,8 @@ mod display;
 mod dtype;
 #[cfg(not(feature = "cuda"))]
 mod dummy_cuda_backend;
+#[cfg(not(feature = "rocm"))]
+mod dummy_rocm_backend;
 mod error;
 #[path = "tensor/layout.rs"]
 mod layout;
@@ -18,6 +20,8 @@ mod nditer;
 pub mod nn;
 #[path = "tensor/op.rs"]
 mod op;
+#[cfg(feature = "rocm")]
+mod rocm;
 pub mod safetensors;
 #[path = "tensor/shape.rs"]
 mod shape;
@@ -43,6 +47,10 @@ pub use tensor::Tensor;
 pub use cuda::{CudaDevice, CudaStorage};
 #[cfg(not(feature = "cuda"))]
 pub use dummy_cuda_backend::{CudaDevice, CudaStorage};
+#[cfg(not(feature = "rocm"))]
+pub use dummy_rocm_backend::{RocmDevice, RocmStorage};
+#[cfg(feature = "rocm")]
+pub use rocm::{RocmDevice, RocmStorage};
 
 pub trait Module {
     fn forward(&self, input: &Tensor) -> Result<Tensor>;

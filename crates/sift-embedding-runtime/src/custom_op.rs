@@ -1,5 +1,5 @@
 use crate::tensor::from_storage;
-use crate::{CpuStorage, CudaStorage, Layout, Result, Shape, Tensor};
+use crate::{CpuStorage, CudaStorage, Layout, Result, RocmStorage, Shape, Tensor};
 
 pub trait CustomOp1 {
     fn name(&self) -> &'static str;
@@ -9,6 +9,12 @@ pub trait CustomOp1 {
     fn cuda_fwd(&self, _: &CudaStorage, _: &Layout) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no CUDA implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn rocm_fwd(&self, _: &RocmStorage, _: &Layout) -> Result<(RocmStorage, Shape)> {
+        Err(crate::Error::Rocm(
+            format!("no ROCm implementation for {}", self.name()).into(),
         ))
     }
 }
@@ -37,6 +43,20 @@ pub trait CustomOp3 {
     ) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no CUDA implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn rocm_fwd(
+        &self,
+        _: &RocmStorage,
+        _: &Layout,
+        _: &RocmStorage,
+        _: &Layout,
+        _: &RocmStorage,
+        _: &Layout,
+    ) -> Result<(RocmStorage, Shape)> {
+        Err(crate::Error::Rocm(
+            format!("no ROCm implementation for {}", self.name()).into(),
         ))
     }
 }

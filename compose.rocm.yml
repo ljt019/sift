@@ -1,0 +1,14 @@
+services:
+  sift:
+    image: sift:rocm
+    build:
+      dockerfile: dockerfile.rocm
+    gpus: !reset []
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    environment:
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-rocm}

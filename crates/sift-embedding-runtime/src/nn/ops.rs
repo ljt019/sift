@@ -90,6 +90,15 @@ impl crate::CustomOp1 for SoftmaxLastDim {
             layout.shape().clone(),
         ))
     }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        storage: &crate::RocmStorage,
+        layout: &Layout,
+    ) -> Result<(crate::RocmStorage, Shape)> {
+        crate::rocm::softmax_fwd(storage, layout)
+    }
 }
 
 pub fn softmax_last_dim(input: &Tensor) -> Result<Tensor> {

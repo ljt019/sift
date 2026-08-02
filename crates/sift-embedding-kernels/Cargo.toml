@@ -5,5 +5,10 @@ edition = "2021"
 license = "MIT"
 publish = false
 
+[features]
+default = []
+cuda = ["dep:cudaforge"]
+rocm = []
+
 [build-dependencies]
-cudaforge = "0.1.2"
+cudaforge = { version = "0.1.2", optional = true }

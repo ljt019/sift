@@ -16,8 +16,8 @@ const MODEL_NAME: &str = "embeddinggemma-300m";
 const MODEL_REVISION: &str = "57c266a740f537b4dc058e1b0cda161fd15afa75";
 const DOCUMENT_PROMPT: &str = "title: none | text: ";
 const QUERY_PROMPT: &str = "task: search result | query: ";
-const CUDA_MEMORY_UTILIZATION_NUMERATOR: usize = 3;
-const CUDA_MEMORY_UTILIZATION_DENOMINATOR: usize = 4;
+const GPU_MEMORY_UTILIZATION_NUMERATOR: usize = 3;
+const GPU_MEMORY_UTILIZATION_DENOMINATOR: usize = 4;
 
 pub struct EmbeddingGemma {
     tokenizer: Tokenizer,
@@ -48,10 +48,11 @@ pub struct DocumentTokenSpan {
 pub enum EmbeddingBackend {
     Cpu,
     Cuda(usize),
+    Rocm(usize),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("expected cpu, cuda, or cuda:N")]
+#[error("expected cpu, cuda, cuda:N, rocm, or rocm:N")]
 pub struct ParseEmbeddingBackendError;
 
 impl std::str::FromStr for EmbeddingBackend {
@@ -61,11 +62,16 @@ impl std::str::FromStr for EmbeddingBackend {
         match value {
             "cpu" => Ok(Self::Cpu),
             "cuda" => Ok(Self::Cuda(0)),
-            _ => value
-                .strip_prefix("cuda:")
-                .and_then(|ordinal| ordinal.parse().ok())
-                .map(Self::Cuda)
-                .ok_or(ParseEmbeddingBackendError),
+            "rocm" => Ok(Self::Rocm(0)),
+            _ => {
+                let (backend, ordinal) = value.split_once(':').ok_or(ParseEmbeddingBackendError)?;
+                let ordinal = ordinal.parse().map_err(|_| ParseEmbeddingBackendError)?;
+                match backend {
+                    "cuda" => Ok(Self::Cuda(ordinal)),
+                    "rocm" => Ok(Self::Rocm(ordinal)),
+                    _ => Err(ParseEmbeddingBackendError),
+                }
+            }
         }
     }
 }
@@ -102,6 +108,8 @@ impl EmbeddingGemma {
             EmbeddingBackend::Cpu => Device::Cpu,
             EmbeddingBackend::Cuda(ordinal) => Device::new_cuda(ordinal)
                 .with_context(|| format!("failed to initialize CUDA device {ordinal}"))?,
+            EmbeddingBackend::Rocm(ordinal) => Device::new_rocm(ordinal)
+                .with_context(|| format!("failed to initialize ROCm device {ordinal}"))?,
         };
         let model_weights = mmap_weights(&files.model, &device)?;
         let projection_in_weights = mmap_weights(&files.projection_in, &device)?;
@@ -149,11 +157,13 @@ impl EmbeddingGemma {
             DeviceLocation::Cpu => Ok(std::thread::available_parallelism()
                 .map_or(1, std::num::NonZeroUsize::get)
                 .saturating_mul(DOCUMENT_CHUNK_TOKENS)),
-            DeviceLocation::Cuda { .. } => self.profile_cuda_document_batch_tokens(),
+            DeviceLocation::Cuda { .. } | DeviceLocation::Rocm { .. } => {
+                self.profile_gpu_document_batch_tokens()
+            }
         }
     }
 
-    fn profile_cuda_document_batch_tokens(&self) -> Result<usize> {
+    fn profile_gpu_document_batch_tokens(&self) -> Result<usize> {
         let source = "sift embedding batch calibration ".repeat(DOCUMENT_CHUNK_TOKENS);
         let tokenizer = self.document_tokenizer()?;
         let span = tokenizer
@@ -166,12 +176,12 @@ impl EmbeddingGemma {
 
         ensure!(
             self.device.begin_memory_profile()?,
-            "CUDA memory profiling is unavailable"
+            "GPU memory profiling is unavailable"
         );
         let embedding = self.embed_documents(&[document], self.encoder.hidden_size);
         let profile = self.device.end_memory_profile();
         embedding.context("EmbeddingGemma batch calibration failed")?;
-        let profile = profile?.context("CUDA memory profiling did not produce a measurement")?;
+        let profile = profile?.context("GPU memory profiling did not produce a measurement")?;
 
         Ok(document_batch_tokens_from_profile(profile, input_tokens))
     }
@@ -470,8 +480,8 @@ fn document_batch_tokens_from_profile(profile: MemoryProfile, input_tokens: usiz
         .min(usize::MAX as u128) as usize;
     let usable_memory = profile
         .free_bytes
-        .saturating_mul(CUDA_MEMORY_UTILIZATION_NUMERATOR)
-        / CUDA_MEMORY_UTILIZATION_DENOMINATOR;
+        .saturating_mul(GPU_MEMORY_UTILIZATION_NUMERATOR)
+        / GPU_MEMORY_UTILIZATION_DENOMINATOR;
     let inputs = (usable_memory / peak_at_limit).max(1);
     inputs.saturating_mul(DOCUMENT_CHUNK_TOKENS)
 }
@@ -987,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_batch_capacity_keeps_memory_headroom() {
+    fn gpu_batch_capacity_keeps_memory_headroom() {
         let tokens = document_batch_tokens_from_profile(
             MemoryProfile {
                 free_bytes: 1_000,
@@ -999,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_batch_capacity_accounts_for_shorter_calibration_input() {
+    fn gpu_batch_capacity_accounts_for_shorter_calibration_input() {
         let tokens = document_batch_tokens_from_profile(
             MemoryProfile {
                 free_bytes: 1_000,
@@ -1015,6 +1025,8 @@ mod tests {
         assert_eq!("cpu".parse(), Ok(EmbeddingBackend::Cpu));
         assert_eq!("cuda".parse(), Ok(EmbeddingBackend::Cuda(0)));
         assert_eq!("cuda:2".parse(), Ok(EmbeddingBackend::Cuda(2)));
-        assert!("rocm".parse::<EmbeddingBackend>().is_err());
+        assert_eq!("rocm".parse(), Ok(EmbeddingBackend::Rocm(0)));
+        assert_eq!("rocm:3".parse(), Ok(EmbeddingBackend::Rocm(3)));
+        assert!("rocm:".parse::<EmbeddingBackend>().is_err());
     }
 }

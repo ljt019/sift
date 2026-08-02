@@ -29,9 +29,11 @@ That is 9,472 values and 37,888 bytes per backend.
 |---|---|
 | `embedding_gemma_cpu_zen5_f32.bin` | `7af0cbdff9549a87810150b19f70b1868f7636d7213115250b6e776d35125de8` |
 | `embedding_gemma_cuda_sm86_cuda12.9_f32.bin` | `59261aceecd6f42a2d28fb8d28b3a1c35b93a1130fffe192212309ed3b1cba37` |
+| `embedding_gemma_rocm_gfx1151_hipblas_rocm7.2_f32.bin` | `4c02c3f8b1226a059b8d0c6c5a14cdadc1b46a606be6dea4912f4b915129dcae` |
+| `embedding_gemma_rocm_gfx1151_hiprtc_rocm7.2_f32.bin` | `2eec03458f59f090db854502400ca8ced26c4993fd2d10a6f661493ce4f6614b` |
 
-Both fixtures reproduced identically in two independent runs immediately
-after capture.
+All fixtures reproduced identically in two independent runs immediately after
+capture.
 
 ## Capture scope
 
@@ -40,6 +42,8 @@ after capture.
 - GPU: NVIDIA GeForce RTX 3060, compute capability 8.6
 - CUDA toolkit 12.9.86
 - NVIDIA driver 595.84
+- ROCm host: AMD Ryzen AI Max+ 395, Radeon 8060S (`gfx1151`)
+- ROCm 7.2.3, with both hipBLAS and the bundled HIPRTC matmul path captured
 
 Exact floating-point behavior can depend on hardware, compiler, CUDA, and
 cuBLAS. A mismatch after changing that environment is evidence requiring
@@ -55,6 +59,12 @@ cargo test --release --test test_embedding_gemma_exact \
 cargo test --release --features cuda \
   --test test_embedding_gemma_exact embedding_gemma_cuda_is_bit_exact \
   -- --ignored --nocapture
+SIFT_ROCM_LIB_DIR=/path/to/rocm/lib cargo test --release --features rocm \
+  --test test_embedding_gemma_exact embedding_gemma_rocm_hipblas_is_bit_exact \
+  -- --ignored --nocapture
+SIFT_ROCM_LIB_DIR=/path/to/rocm/lib SIFT_ROCM_FORCE_HIPRTC_MATMUL=1 \
+  cargo test --release --features rocm --test test_embedding_gemma_exact \
+  embedding_gemma_rocm_hiprtc_is_bit_exact -- --ignored --nocapture
 ```
 
 On failure, the harness reports the scenario, document, dimension, expected
@@ -79,6 +89,13 @@ SIFT_BLESS_EXACT=1 cargo test --release --test test_embedding_gemma_exact \
   embedding_gemma_cpu_is_bit_exact -- --ignored --nocapture
 SIFT_BLESS_EXACT=1 cargo test --release --features cuda \
   --test test_embedding_gemma_exact embedding_gemma_cuda_is_bit_exact \
+  -- --ignored --nocapture
+SIFT_BLESS_EXACT=1 SIFT_ROCM_LIB_DIR=/path/to/rocm/lib \
+  cargo test --release --features rocm --test test_embedding_gemma_exact \
+  embedding_gemma_rocm_hipblas_is_bit_exact -- --ignored --nocapture
+SIFT_BLESS_EXACT=1 SIFT_ROCM_LIB_DIR=/path/to/rocm/lib \
+  SIFT_ROCM_FORCE_HIPRTC_MATMUL=1 cargo test --release --features rocm \
+  --test test_embedding_gemma_exact embedding_gemma_rocm_hiprtc_is_bit_exact \
   -- --ignored --nocapture
 ```
 

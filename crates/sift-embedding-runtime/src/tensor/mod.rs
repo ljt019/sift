@@ -317,6 +317,7 @@ impl Tensor {
         match self.storage() {
             Storage::Cpu(storage) => from_cpu_storage(storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Rocm(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
         }
     }
 

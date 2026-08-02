@@ -46,7 +46,8 @@ fn main() -> Result<()> {
     let backend = match backend.as_str() {
         "cpu" => EmbeddingBackend::Cpu,
         "cuda" => EmbeddingBackend::Cuda(0),
-        other => bail!("unsupported backend {other:?}; expected cpu or cuda"),
+        "rocm" => EmbeddingBackend::Rocm(0),
+        other => bail!("unsupported backend {other:?}; expected cpu, cuda, or rocm"),
     };
     let model = EmbeddingGemma::load_on(backend)?;
 

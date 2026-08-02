@@ -79,11 +79,17 @@ pub enum Error {
     #[error("CUDA support is not enabled")]
     NotCompiledWithCudaSupport,
 
+    #[error("ROCm support is not enabled")]
+    NotCompiledWithRocmSupport,
+
     #[error("tensor {path} was not found")]
     CannotFindTensor { path: String },
 
     #[error(transparent)]
     Cuda(Box<dyn std::error::Error + Send + Sync>),
+
+    #[error(transparent)]
+    Rocm(Box<dyn std::error::Error + Send + Sync>),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

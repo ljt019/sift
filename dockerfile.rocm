@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.7
+
+ARG ROCM_VERSION=7.2.4
+
+FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS builder
+
+ARG ROCM_VERSION
+ARG RUST_VERSION=1.95.0
+
+ENV PATH=/root/.cargo/bin:${PATH}
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+        https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+
+WORKDIR /build
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/build/target \
+    CARGO_TARGET_DIR="/build/target/rocm-${ROCM_VERSION}" \
+    cargo build --locked --release --features rocm --bin sift \
+    && cp "/build/target/rocm-${ROCM_VERSION}/release/sift" /usr/local/bin/sift
+
+FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 sift \
+    && useradd --uid 10001 --gid sift --create-home --shell /usr/sbin/nologin sift \
+    && install --directory --owner sift --group sift /var/cache/sift/huggingface
+
+COPY --from=builder /usr/local/bin/sift /usr/local/bin/sift
+COPY --from=builder /build/LICENSE /usr/share/doc/sift/LICENSE
+COPY --from=builder /build/crates/sift-embedding-runtime/LICENSE-CANDLE-MIT /usr/share/doc/sift/LICENSE-CANDLE-MIT
+
+ENV HF_HOME=/var/cache/sift/huggingface \
+    ROCM_PATH=/opt/rocm \
+    SIFT_ROCM_LIB_DIR=/opt/rocm/lib
+
+WORKDIR /app
+USER sift
+
+ENTRYPOINT ["/usr/local/bin/sift"]

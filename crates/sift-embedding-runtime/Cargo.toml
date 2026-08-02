@@ -7,7 +7,12 @@ publish = false
 
 [features]
 default = []
-cuda = ["dep:cudarc", "dep:sift-embedding-kernels"]
+cuda = [
+    "dep:cudarc",
+    "dep:sift-embedding-kernels",
+    "sift-embedding-kernels/cuda",
+]
+rocm = ["dep:sift-embedding-kernels", "sift-embedding-kernels/rocm"]
 
 [dependencies]
 sift-embedding-kernels = { path = "../sift-embedding-kernels", optional = true }

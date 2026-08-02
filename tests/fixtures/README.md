@@ -18,11 +18,17 @@ than the model context window.
 Two consecutive generations with the pinned environment produced this same
 fixture hash.
 
-The Rust test requires cosine similarity above `0.9999995`, maximum absolute
-element error below `3e-7`, and root-mean-square error below `1e-7`. Across
-the exercised 768D query/document and 128D document cases, CPU and CUDA both
-remain inside those bounds with observed maximum absolute error below
-`2.74e-7` and RMSE below `7.87e-8`.
+The Rust test requires cosine similarity above `0.9999995`. CPU and CUDA use a
+maximum absolute element error below `3e-7` and root-mean-square error below
+`1e-7`; both remain inside those bounds with observed maximum absolute error
+below `2.74e-7` and RMSE below `7.87e-8` on the capture host. The intentionally
+truncated 2,000-token stress case has separate portable bounds of `2e-6` and
+`1e-6` to account for accumulated floating-point drift across hardware and its
+second normalization at 128 dimensions. ROCm uses bounds of `1e-6` and `2e-7`,
+respectively, for ordinary inputs because of its different GEMM and
+transcendental implementations. On gfx1151 with
+ROCm 7.2, the hipBLAS and HIPRTC-matmul paths both passed, with combined worst
+cases of `5.97e-7` maximum absolute error and `1.71e-7` RMSE.
 
 Backend-specific raw output references for optimization work are documented
 under `exact/`. They preserve Sift's established bits but are not substitutes

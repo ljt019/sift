@@ -1,6 +1,6 @@
 use crate::backend::BackendStorage;
 use crate::op;
-use crate::{CpuStorage, CudaStorage, CustomOp1, CustomOp3};
+use crate::{CpuStorage, CudaStorage, CustomOp1, CustomOp3, RocmStorage};
 use crate::{DType, Device, Error, Layout, Result, Shape};
 
 // We do not want to implement Clone on Storage as cloning may fail because of
@@ -9,6 +9,7 @@ use crate::{DType, Device, Error, Layout, Result, Shape};
 pub enum Storage {
     Cpu(CpuStorage),
     Cuda(CudaStorage),
+    Rocm(RocmStorage),
 }
 
 impl Storage {
@@ -16,6 +17,7 @@ impl Storage {
         match self {
             Self::Cpu(_) => Device::Cpu,
             Self::Cuda(storage) => Device::Cuda(storage.device().clone()),
+            Self::Rocm(storage) => Device::Rocm(storage.device().clone()),
         }
     }
 
@@ -23,6 +25,7 @@ impl Storage {
         match self {
             Self::Cpu(storage) => storage.dtype(),
             Self::Cuda(storage) => storage.dtype(),
+            Self::Rocm(storage) => storage.dtype(),
         }
     }
 
@@ -58,6 +61,10 @@ impl Storage {
                 let storage = storage.affine(layout, mul, add)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Rocm(storage) => {
+                let storage = storage.affine(layout, mul, add)?;
+                Ok(Self::Rocm(storage))
+            }
         }
     }
 
@@ -70,6 +77,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.reduce_sum(layout, dimensions)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Rocm(storage) => {
+                let storage = storage.reduce_sum(layout, dimensions)?;
+                Ok(Self::Rocm(storage))
             }
         }
     }
@@ -84,6 +95,10 @@ impl Storage {
                 let storage = storage.to_dtype(layout, dtype)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Rocm(storage) => {
+                let storage = storage.to_dtype(layout, dtype)?;
+                Ok(Self::Rocm(storage))
+            }
         }
     }
 
@@ -96,6 +111,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let (storage, shape) = c.cuda_fwd(storage, l)?;
                 Ok((Self::Cuda(storage), shape))
+            }
+            Self::Rocm(storage) => {
+                let (storage, shape) = c.rocm_fwd(storage, l)?;
+                Ok((Self::Rocm(storage), shape))
             }
         }
     }
@@ -120,6 +139,10 @@ impl Storage {
                 let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Cuda(s), shape))
             }
+            (Self::Rocm(s1), Self::Rocm(s2), Self::Rocm(s3)) => {
+                let (s, shape) = c.rocm_fwd(s1, l1, s2, l2, s3, l3)?;
+                Ok((Self::Rocm(s), shape))
+            }
             _ => unreachable!(),
         }
     }
@@ -133,6 +156,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.unary_impl::<B>(layout)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Rocm(storage) => {
+                let storage = storage.unary_impl::<B>(layout)?;
+                Ok(Self::Rocm(storage))
             }
         }
     }
@@ -153,6 +180,10 @@ impl Storage {
             (Self::Cuda(lhs), Self::Cuda(rhs)) => {
                 let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Cuda(storage))
+            }
+            (Self::Rocm(lhs), Self::Rocm(rhs)) => {
+                let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::Rocm(storage))
             }
             (lhs, rhs) => {
                 // Should not happen because of the same device check above but we're defensive
@@ -184,6 +215,10 @@ impl Storage {
                 let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
                 Ok(Self::Cuda(storage))
             }
+            (Self::Rocm(lhs), Self::Rocm(rhs)) => {
+                let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
+                Ok(Self::Rocm(storage))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -211,6 +246,10 @@ impl Storage {
                 let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
                 Ok(Self::Cuda(storage))
             }
+            (Self::Rocm(lhs), Self::Rocm(rhs)) => {
+                let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
+                Ok(Self::Rocm(storage))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -230,6 +269,7 @@ impl Storage {
         match (self, dst) {
             (Self::Cpu(src), Self::Cpu(dst)) => src.copy_strided_src(dst, dst_offset, src_l),
             (Self::Cuda(src), Self::Cuda(dst)) => Ok(src.copy_strided_src(dst, dst_offset, src_l)?),
+            (Self::Rocm(src), Self::Rocm(dst)) => Ok(src.copy_strided_src(dst, dst_offset, src_l)?),
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),

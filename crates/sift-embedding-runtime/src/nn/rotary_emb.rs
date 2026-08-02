@@ -161,6 +161,26 @@ impl crate::CustomOp3 for RotaryEmbedding {
             source_layout.shape().clone(),
         ))
     }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(
+        &self,
+        source: &crate::RocmStorage,
+        source_layout: &Layout,
+        cosine: &crate::RocmStorage,
+        cosine_layout: &Layout,
+        sine: &crate::RocmStorage,
+        sine_layout: &Layout,
+    ) -> Result<(crate::RocmStorage, Shape)> {
+        crate::rocm::rope_fwd(
+            source,
+            source_layout,
+            cosine,
+            cosine_layout,
+            sine,
+            sine_layout,
+        )
+    }
 }
 
 fn frequency_shape(frequencies: &Tensor, batch: usize) -> Result<(usize, usize)> {

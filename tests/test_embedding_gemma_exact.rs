@@ -111,6 +111,35 @@ fn fixture_path(filename: &str) -> PathBuf {
         .join(filename)
 }
 
+fn scenarios() -> Vec<Scenario<'static>> {
+    vec![
+        Scenario {
+            name: "single-768",
+            kind: InputKind::Document,
+            documents: &DOCUMENTS[..1],
+            dimensions: 768,
+        },
+        Scenario {
+            name: "batch-8-768",
+            kind: InputKind::Document,
+            documents: &DOCUMENTS,
+            dimensions: 768,
+        },
+        Scenario {
+            name: "batch-8-128",
+            kind: InputKind::Document,
+            documents: &DOCUMENTS,
+            dimensions: 128,
+        },
+        Scenario {
+            name: "queries-2-768",
+            kind: InputKind::Query,
+            documents: &QUERIES,
+            dimensions: 768,
+        },
+    ]
+}
+
 fn check_backend(backend_name: &str, backend: EmbeddingBackend, fixture_name: &str) -> Result<()> {
     ensure!(
         !cfg!(debug_assertions),
@@ -119,35 +148,7 @@ fn check_backend(backend_name: &str, backend: EmbeddingBackend, fixture_name: &s
     dotenvy::dotenv().ok();
 
     let model = EmbeddingGemma::load_on(backend)?;
-    let captures = capture(
-        &model,
-        vec![
-            Scenario {
-                name: "single-768",
-                kind: InputKind::Document,
-                documents: &DOCUMENTS[..1],
-                dimensions: 768,
-            },
-            Scenario {
-                name: "batch-8-768",
-                kind: InputKind::Document,
-                documents: &DOCUMENTS,
-                dimensions: 768,
-            },
-            Scenario {
-                name: "batch-8-128",
-                kind: InputKind::Document,
-                documents: &DOCUMENTS,
-                dimensions: 128,
-            },
-            Scenario {
-                name: "queries-2-768",
-                kind: InputKind::Query,
-                documents: &QUERIES,
-                dimensions: 768,
-            },
-        ],
-    )?;
+    let captures = capture(&model, scenarios())?;
     let actual = raw_bytes(&captures);
     let fixture = fixture_path(fixture_name);
 
@@ -195,6 +196,36 @@ fn embedding_gemma_cuda_is_bit_exact() -> Result<()> {
         "cuda",
         EmbeddingBackend::Cuda(0),
         "embedding_gemma_cuda_sm86_cuda12.9_f32.bin",
+    )
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+#[ignore = "loads EmbeddingGemma and checks gfx1151 hipBLAS output"]
+fn embedding_gemma_rocm_hipblas_is_bit_exact() -> Result<()> {
+    ensure!(
+        std::env::var("SIFT_ROCM_FORCE_HIPRTC_MATMUL").as_deref() != Ok("1"),
+        "hipBLAS exactness requires SIFT_ROCM_FORCE_HIPRTC_MATMUL to be unset"
+    );
+    check_backend(
+        "rocm-hipblas",
+        EmbeddingBackend::Rocm(0),
+        "embedding_gemma_rocm_gfx1151_hipblas_rocm7.2_f32.bin",
+    )
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+#[ignore = "loads EmbeddingGemma and checks gfx1151 HIPRTC matmul output"]
+fn embedding_gemma_rocm_hiprtc_is_bit_exact() -> Result<()> {
+    ensure!(
+        std::env::var("SIFT_ROCM_FORCE_HIPRTC_MATMUL").as_deref() == Ok("1"),
+        "HIPRTC exactness requires SIFT_ROCM_FORCE_HIPRTC_MATMUL=1"
+    );
+    check_backend(
+        "rocm-hiprtc",
+        EmbeddingBackend::Rocm(0),
+        "embedding_gemma_rocm_gfx1151_hiprtc_rocm7.2_f32.bin",
     )
 }
 

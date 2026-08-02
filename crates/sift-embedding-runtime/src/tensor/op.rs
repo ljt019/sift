@@ -1,6 +1,6 @@
 pub trait UnaryOpT {
     const NAME: &'static str;
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     const KERNEL: &'static str;
     #[cfg(feature = "cuda")]
     const V: Self;
@@ -17,7 +17,7 @@ pub trait UnaryOpT {
 
 pub trait BinaryOpT {
     const NAME: &'static str;
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     const KERNEL: &'static str;
     #[cfg(feature = "cuda")]
     const V: Self;
@@ -46,7 +46,7 @@ macro_rules! binary_op {
 
         impl BinaryOpT for $name {
             const NAME: &'static str = $kernel;
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             const KERNEL: &'static str = concat!("b", $kernel);
             #[cfg(feature = "cuda")]
             const V: Self = Self;
@@ -69,7 +69,7 @@ macro_rules! unary_op {
 
         impl UnaryOpT for $name {
             const NAME: &'static str = $kernel;
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             const KERNEL: &'static str = concat!("u", $kernel);
             #[cfg(feature = "cuda")]
             const V: Self = Self;
@@ -91,7 +91,7 @@ pub struct Gelu;
 
 impl UnaryOpT for Gelu {
     const NAME: &'static str = "gelu";
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     const KERNEL: &'static str = "ugelu";
     #[cfg(feature = "cuda")]
     const V: Self = Self;
@@ -107,7 +107,7 @@ pub struct GeluErf;
 
 impl UnaryOpT for GeluErf {
     const NAME: &'static str = "gelu_erf";
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     const KERNEL: &'static str = "ugelu_erf";
     #[cfg(feature = "cuda")]
     const V: Self = Self;

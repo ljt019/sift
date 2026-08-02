@@ -1,9 +1,10 @@
-use std::env;
-use std::path::PathBuf;
+#[cfg(feature = "cuda")]
+fn main() -> cudaforge::Result<()> {
+    use std::env;
+    use std::path::PathBuf;
 
-use cudaforge::{KernelBuilder, Result};
+    use cudaforge::KernelBuilder;
 
-fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=src/cuda_utils.cuh");
     println!("cargo::rerun-if-changed=src/binary_op_macros.cuh");
@@ -30,4 +31,10 @@ fn main() -> Result<()> {
 
     builder.build_ptx()?.write(output.join("ptx.rs"))?;
     Ok(())
+}
+
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=src");
 }
