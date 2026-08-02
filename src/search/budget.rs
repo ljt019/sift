@@ -118,6 +118,8 @@ mod tests {
                     date: None,
                     snippet: String::new(),
                 },
+                source_priority: false,
+                upstream_consensus: false,
                 content: content.into(),
                 full_length: content.chars().count(),
                 from_snippet: false,

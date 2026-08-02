@@ -4,6 +4,7 @@ use serde::Deserialize;
 use tokio::time::{Instant, sleep_until};
 use url::Url;
 
+use super::evidence::has_numerical_parity_intent;
 use super::{Hit, exact_identifier_query};
 use crate::state::AppState;
 
@@ -11,7 +12,7 @@ const SEARCH_INTERVAL: Duration = Duration::from_secs(6);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub async fn search(state: &AppState, query: &str, limit: usize) -> Vec<Hit> {
-    let Some(query) = exact_identifier_query(query) else {
+    let Some(query) = issue_query(query) else {
         return Vec::new();
     };
     if limit == 0 {
@@ -29,10 +30,17 @@ pub async fn search(state: &AppState, query: &str, limit: usize) -> Vec<Hit> {
             hits
         }
         Err(error) => {
-            tracing::debug!(error = ?error, "GitHub issue search failed; continuing without exact-identifier candidates");
+            tracing::debug!(error = ?error, "GitHub issue search failed; continuing without direct issue candidates");
             Vec::new()
         }
     }
+}
+
+fn issue_query(query: &str) -> Option<String> {
+    exact_identifier_query(query).or_else(|| {
+        has_numerical_parity_intent(query)
+            .then(|| "\"CPU\" \"CUDA\" inference numerical difference type:issue".into())
+    })
 }
 
 async fn wait_for_rate_limit(state: &AppState) {
@@ -107,14 +115,30 @@ mod tests {
     #[test]
     fn focuses_exact_identifiers_without_triggering_ordinary_queries() {
         assert_eq!(
-            exact_identifier_query("invalid_reference_casting tokenizers Rust 1.73").as_deref(),
+            issue_query("invalid_reference_casting tokenizers Rust 1.73").as_deref(),
             Some("\"invalid_reference_casting\" tokenizers")
         );
         assert_eq!(
-            exact_identifier_query("rust unresolved import tower_http::timeout").as_deref(),
+            issue_query("rust unresolved import tower_http::timeout").as_deref(),
             Some("\"tower_http::timeout\"")
         );
-        assert_eq!(exact_identifier_query("serde internally tagged enum"), None);
+        assert_eq!(issue_query("serde internally tagged enum"), None);
+    }
+
+    #[test]
+    fn numerical_parity_queries_search_concrete_issue_reports() {
+        assert_eq!(
+            issue_query(
+                "detect silent numerical drift porting machine-learning inference from CPU to CUDA bitwise reproducibility tolerance testing"
+            )
+            .as_deref(),
+            Some("\"CPU\" \"CUDA\" inference numerical difference type:issue")
+        );
+        assert_eq!(issue_query("CUDA inference performance tuning"), None);
+        assert_eq!(
+            issue_query("reproducible hermetic builds Bazel Nix Pants case studies"),
+            None
+        );
     }
 
     #[test]
