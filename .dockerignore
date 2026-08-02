@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+.env
+.ruff_cache
+__pycache__
+target
+debug
+scripts
+tests
+*.pyc

@@ -1,0 +1,28 @@
+[package]
+name = "sift-embedding-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[features]
+default = []
+cuda = ["dep:cudarc", "dep:sift-embedding-kernels"]
+
+[dependencies]
+sift-embedding-kernels = { path = "../sift-embedding-kernels", optional = true }
+cudarc = { version = "0.19.8", default-features = false, optional = true, features = [
+    "std",
+    "cublas",
+    "driver",
+    "nvrtc",
+    "cuda-version-from-build-system",
+    "dynamic-loading",
+] }
+gemm = { version = "0.19", default-features = false, features = ["std", "rayon", "wasm-simd128-enable"] }
+libm = "0.2.15"
+memmap2 = "0.9"
+num_cpus = "1"
+rayon = "1"
+safetensors = "0.8"
+thiserror = "2"

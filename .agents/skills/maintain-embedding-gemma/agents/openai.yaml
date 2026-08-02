@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain EmbeddingGemma"
+  short_description: "Protect embedding correctness while changing Sift"
+  default_prompt: "Use $maintain-embedding-gemma to make this EmbeddingGemma change and validate it at the right correctness level."

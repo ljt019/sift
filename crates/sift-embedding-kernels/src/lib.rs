@@ -1,0 +1,65 @@
+mod ptx {
+    include!(concat!(env!("OUT_DIR"), "/ptx.rs"));
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Id {
+    Affine,
+    Binary,
+    Cast,
+    Indexing,
+    Reduce,
+    Unary,
+}
+
+pub const ALL_IDS: [Id; 6] = [
+    Id::Affine,
+    Id::Binary,
+    Id::Cast,
+    Id::Indexing,
+    Id::Reduce,
+    Id::Unary,
+];
+
+pub struct Module {
+    index: usize,
+    ptx: &'static str,
+}
+
+impl Module {
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn ptx(&self) -> &'static str {
+        self.ptx
+    }
+}
+
+const fn module_index(id: Id) -> usize {
+    let mut i = 0;
+    while i < ALL_IDS.len() {
+        if ALL_IDS[i] as u32 == id as u32 {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("id not found")
+}
+
+macro_rules! mdl {
+    ($cst:ident, $id:ident) => {
+        pub const $cst: Module = Module {
+            index: module_index(Id::$id),
+            ptx: ptx::$cst,
+        };
+    };
+}
+
+mdl!(AFFINE, Affine);
+mdl!(BINARY, Binary);
+mdl!(CAST, Cast);
+mdl!(INDEXING, Indexing);
+mdl!(REDUCE, Reduce);
+mdl!(UNARY, Unary);

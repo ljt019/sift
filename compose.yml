@@ -1,0 +1,115 @@
+services:
+  sift:
+    image: sift:latest
+    build:
+      context: .
+      dockerfile: dockerfile
+    restart: unless-stopped
+    init: true
+    gpus: all
+
+    ports:
+      - "8099:8099"
+
+    environment:
+      BIND: 0.0.0.0:8099
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES:-general,it,science,news}
+      SEARXNG_TIMEOUT_SECS: ${SEARXNG_TIMEOUT_SECS:-25}
+      SEARXNG_CONCURRENCY: ${SEARXNG_CONCURRENCY:-2}
+      SEARXNG_MIN_INTERVAL_MS: ${SEARXNG_MIN_INTERVAL_MS:-1000}
+      EMBEDDING_ENABLED: ${EMBEDDING_ENABLED:-true}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cuda}
+      HF_TOKEN: ${HF_TOKEN:-}
+      STACKEXCHANGE_KEY: ${STACKEXCHANGE_KEY:-}
+      SIFT_DEBUG_DIR: ${SIFT_DEBUG_DIR:-}
+      SIFT_LOG: ${SIFT_LOG:-sift=info,tower_http=info}
+
+    volumes:
+      - huggingface-cache:/var/cache/sift/huggingface
+
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8099/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - sift-network
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    profiles: [bundled]
+
+    volumes:
+      - /var/lib/searxng/core-config:/etc/searxng:rw
+      - /var/lib/searxng/cache:/var/cache/searxng:rw
+
+    environment:
+      SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+      FORCE_OWNERSHIP: "true"
+
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - sift-network
+
+  valkey:
+    image: docker.io/valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - sift-network
+
+networks:
+  sift-network:
+    driver: bridge
+
+volumes:
+  huggingface-cache:

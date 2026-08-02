@@ -1,0 +1,6 @@
+/target
+.env
+/.ruff_cache
+/debug
+__pycache__/
+*.pyc
