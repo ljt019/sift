@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.95.0
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Validate Compose configurations
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yml -f compose.rocm.yml config --quiet
+
+      - name: Type-check all targets
+        run: cargo check --locked --workspace --all-targets
+
+      - name: Type-check ROCm targets
+        run: cargo check --locked --workspace --all-targets --features rocm
+
+      - name: Lint all targets
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Lint ROCm targets
+        run: cargo clippy --locked --workspace --all-targets --features rocm -- -D warnings
+
+      - name: Build CPU release
+        run: cargo build --locked --release --workspace
+
+      - name: Build ROCm release
+        run: cargo build --locked --release --workspace --features rocm
+
+      - name: Compile all test targets
+        run: cargo test --locked --workspace --all-targets --no-run
+
+      - name: Run unit tests
+        run: cargo test --locked --workspace --lib --bins
+
+      - name: Run ROCm-enabled unit tests
+        run: cargo test --locked --workspace --lib --bins --features rocm
+
+      - name: Run offline integration tests
+        # test_embedding_gemma loads the gated model, so CI compiles but does
+        # not run it. Backend exactness cases remain ignored and hardware-gated.
+        run: cargo test --locked --test test_embedding_gemma_exact
+
+      - name: Run documentation tests
+        run: cargo test --locked --workspace --doc
