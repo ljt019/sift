@@ -36,7 +36,7 @@ struct SearchResponseRecord<'a> {
     query: &'a str,
     target: &'a str,
     result_count: usize,
-    contributors: &'a [String],
+    contributors: &'a [&'a str],
     unresponsive_engines: &'a [Vec<String>],
 }
 
@@ -63,7 +63,7 @@ pub async fn capture_search_response(
     query: &str,
     target: &str,
     result_count: usize,
-    contributors: &[String],
+    contributors: &[&str],
     unresponsive_engines: &[Vec<String>],
 ) {
     let Some(directory) = directory else {
@@ -88,7 +88,7 @@ async fn write_search_response(
     query: &str,
     target: &str,
     result_count: usize,
-    contributors: &[String],
+    contributors: &[&str],
     unresponsive_engines: &[Vec<String>],
 ) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(directory).await?;
@@ -213,7 +213,7 @@ mod tests {
     async fn writes_search_engine_provenance() {
         let directory =
             std::env::temp_dir().join(format!("sift-search-debug-test-{}", std::process::id()));
-        let contributors = vec!["bing".into(), "yep".into()];
+        let contributors = vec!["bing", "yep"];
         let unresponsive = vec![vec!["brave".into(), "too many requests".into()]];
         write_search_response(
             &directory,
@@ -227,12 +227,18 @@ mod tests {
         .unwrap();
 
         let stem = text_hash("categories:general\nrust error");
-        let metadata = tokio::fs::read_to_string(directory.join(format!("{stem}.search.json")))
+        let metadata = tokio::fs::read(directory.join(format!("{stem}.search.json")))
             .await
             .unwrap();
-        assert!(metadata.contains("\"resultCount\": 24"));
-        assert!(metadata.contains("\"contributors\": ["));
-        assert!(metadata.contains("\"too many requests\""));
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(metadata["query"], "rust error");
+        assert_eq!(metadata["target"], "categories:general");
+        assert_eq!(metadata["resultCount"], 24);
+        assert_eq!(metadata["contributors"], serde_json::json!(["bing", "yep"]));
+        assert_eq!(
+            metadata["unresponsiveEngines"],
+            serde_json::json!([["brave", "too many requests"]])
+        );
 
         tokio::fs::remove_dir_all(directory).await.unwrap();
     }

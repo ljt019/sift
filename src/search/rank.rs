@@ -19,8 +19,6 @@ const MAX_NUMERIC_CONSENSUS_BONUS: f32 = 0.05;
 const MIN_NUMERIC_CONSENSUS_DOMAINS: usize = 3;
 const MAX_SEARCH_EXCERPT_CHARACTERS: usize = 800;
 const EVIDENCE_ANCHOR_MAX_SCORE_GAP: f32 = 0.10;
-const NUMERICAL_PARITY_MISSING_CONTEXT_PENALTY: f32 = 0.08;
-const NUMERICAL_PARITY_ISSUE_MAX_SCORE_GAP: f32 = 0.20;
 const DIVERSITY_MAX_SCORE_GAP: f32 = 0.04;
 const DIVERSITY_MIN_SHARED_TITLE_TERMS: usize = 3;
 const DIVERSITY_TITLE_CONTAINMENT_PERCENT: usize = 60;
@@ -53,10 +51,6 @@ pub async fn select(
         .collect::<Vec<_>>();
     let evidence = QueryEvidence::new(query, evidence_documents.iter().map(String::as_str));
     let numeric_consensus = NumericConsensus::new(query, &raw);
-    let numerical_parity_adjustments = evidence_documents
-        .iter()
-        .map(|document| numerical_parity_content_adjustment(query, document))
-        .collect::<Vec<_>>();
     let chunks = build_chunks(embeddings, &evidence, &raw)?;
 
     if chunks.is_empty() {
@@ -82,8 +76,7 @@ pub async fn select(
                     + RECOMMENDATION_EVIDENCE_WEIGHT
                         * recommendation_score(&evidence, &raw, &chunks[chunk])
                     + numeric_consensus.score_text(&chunks[chunk].text)
-                    + evidence.year_adjustment(&chunks[chunk].text)
-                    + numerical_parity_adjustments[chunks[chunk].document],
+                    + evidence.year_adjustment(&chunks[chunk].text),
             )
         })
         .collect::<Vec<_>>();
@@ -116,51 +109,6 @@ pub async fn select(
 
 fn combined_score(dense_score: f32, evidence_score: f32) -> f32 {
     dense_score + LEXICAL_EVIDENCE_WEIGHT * evidence_score
-}
-
-fn numerical_parity_content_adjustment(query: &str, document: &str) -> f32 {
-    if !super::evidence::has_numerical_parity_intent(query)
-        || !super::evidence::has_machine_learning_inference_intent(query)
-    {
-        return 0.0;
-    }
-
-    let lower = document.to_ascii_lowercase();
-    let has_machine_learning = contains_machine_learning_context(&lower);
-    let has_discrepancy = contains_numerical_discrepancy(&lower);
-    -NUMERICAL_PARITY_MISSING_CONTEXT_PENALTY
-        * (!has_machine_learning as u8 + !has_discrepancy as u8) as f32
-}
-
-fn contains_machine_learning_context(lower: &str) -> bool {
-    lower.contains("inference")
-        || lower.contains("machine learning")
-        || lower.contains("deep learning")
-        || lower.contains("neural")
-        || lower.contains("ai model")
-        || lower.contains("language model")
-        || lower.contains("transformer")
-        || lower.contains("pytorch")
-        || lower.contains("tensorflow")
-}
-
-fn contains_numerical_discrepancy(lower: &str) -> bool {
-    [
-        "corrupt",
-        "deviat",
-        "differ",
-        "diverg",
-        "drift",
-        "inconsisten",
-        "incorrect",
-        "mismatch",
-        "nondetermin",
-        "non-determin",
-        "reproduc",
-        "tolerance",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
 }
 
 fn apply_document_evidence(
@@ -548,76 +496,6 @@ fn evidence_anchor_document(
         .map(|(document, _, _)| document)
 }
 
-fn numerical_parity_issue_document(
-    query: &str,
-    raw: &[Raw],
-    best_by_document: &[Option<f32>],
-    best_score: f32,
-) -> Option<usize> {
-    if !super::evidence::has_numerical_parity_intent(query)
-        || !super::evidence::has_machine_learning_inference_intent(query)
-    {
-        return None;
-    }
-
-    raw.iter()
-        .enumerate()
-        .filter_map(|(document, raw)| {
-            let score = best_by_document[document]?;
-            if best_score - score > NUMERICAL_PARITY_ISSUE_MAX_SCORE_GAP
-                || !is_github_issue(&raw.hit.url)
-            {
-                return None;
-            }
-            let text = format!("{}\n{}\n{}", raw.hit.title, raw.hit.snippet, raw.content);
-            let lower = text.to_ascii_lowercase();
-            if numerical_parity_content_adjustment(query, &text) != 0.0
-                || !contains_token(&lower, "cpu")
-                || !contains_gpu_backend(&lower)
-            {
-                return None;
-            }
-            Some((document, parity_issue_title_strength(&raw.hit.title), score))
-        })
-        .max_by(
-            |(left_document, left_strength, left_score),
-             (right_document, right_strength, right_score)| {
-                left_strength
-                    .cmp(right_strength)
-                    .then_with(|| left_score.total_cmp(right_score))
-                    .then_with(|| right_document.cmp(left_document))
-            },
-        )
-        .map(|(document, _, _)| document)
-}
-
-fn is_github_issue(url: &url::Url) -> bool {
-    url.host_str().is_some_and(|host| host == "github.com")
-        && url
-            .path_segments()
-            .is_some_and(|segments| segments.collect::<Vec<_>>().get(2) == Some(&"issues"))
-}
-
-fn parity_issue_title_strength(title: &str) -> u8 {
-    let lower = title.to_ascii_lowercase();
-    u8::from(contains_gpu_backend(&lower)) * 2
-        + u8::from(contains_numerical_discrepancy(&lower)) * 2
-        + u8::from(contains_machine_learning_context(&lower))
-        + u8::from(contains_token(&lower, "cpu"))
-}
-
-fn contains_gpu_backend(lower: &str) -> bool {
-    ["cuda", "gpu", "metal", "mps", "opencl", "rocm", "tpu"]
-        .iter()
-        .any(|backend| contains_token(lower, backend))
-}
-
-fn contains_token(lower: &str, needle: &str) -> bool {
-    lower
-        .split(|character: char| !character.is_alphanumeric())
-        .any(|token| token == needle)
-}
-
 fn source_identity(raw: &Raw) -> Option<String> {
     let url = &raw.hit.url;
     let host = url
@@ -715,7 +593,6 @@ fn diversify_documents(
     best_by_document: &[Option<f32>],
     exact_matches: &[bool],
     evidence_anchor: Option<usize>,
-    numerical_parity_issue: Option<usize>,
     require_extracted: bool,
     require_recommendation: bool,
     recommendation_scores: &[f32],
@@ -725,8 +602,7 @@ fn diversify_documents(
         let document = selected[position];
         let protected = raw[document].source_priority
             || exact_matches[document]
-            || evidence_anchor == Some(document)
-            || numerical_parity_issue == Some(document);
+            || evidence_anchor == Some(document);
         if protected
             || !selected[..position]
                 .iter()
@@ -890,8 +766,6 @@ fn select_documents(
         require_recommendation,
         &recommendation_scores,
     );
-    let numerical_parity_issue =
-        numerical_parity_issue_document(query, raw, &best_by_document, best_score);
 
     // `source_priority` is only set for an explicitly requested source whose
     // host was verified. Reserve one chunkable source regardless of its dense
@@ -907,12 +781,6 @@ fn select_documents(
         && !selected.contains(&anchor)
     {
         selected.push(anchor);
-    }
-    if let Some(issue) = numerical_parity_issue
-        && selected.len() < limit
-        && !selected.contains(&issue)
-    {
-        selected.push(issue);
     }
     let upstream_quota = limit.saturating_sub(selected.len()).div_ceil(2);
     let upstream = (0..upstream_quota.min(document_count))
@@ -953,7 +821,6 @@ fn select_documents(
         &best_by_document,
         &exact_matches,
         evidence_anchor,
-        numerical_parity_issue,
         require_extracted,
         require_recommendation,
         &recommendation_scores,
@@ -979,7 +846,6 @@ fn select_documents(
                 recommendation_evidence = recommendation_scores[document],
                 numeric_consensus = numeric_scores[document],
                 evidence_anchor = evidence_anchor == Some(document),
-                numerical_parity_issue = numerical_parity_issue == Some(document),
                 score,
                 selected = selected.contains(&document),
                 "scored resolved search result"
@@ -2064,79 +1930,6 @@ mod tests {
     }
 
     #[test]
-    fn machine_learning_parity_queries_demote_missing_evidence_axes() {
-        let query = "detect CPU to CUDA machine-learning inference numerical drift";
-        assert_eq!(
-            numerical_parity_content_adjustment(
-                query,
-                "A neural-network inference output diverges between CPU and CUDA."
-            ),
-            0.0
-        );
-        assert_eq!(
-            numerical_parity_content_adjustment(
-                query,
-                "A reproducibility benchmark for CPU and GPU DDA solvers."
-            ),
-            -NUMERICAL_PARITY_MISSING_CONTEXT_PENALTY
-        );
-        assert_eq!(
-            numerical_parity_content_adjustment(
-                query,
-                "Optimize CUDA matrix multiplication for model inference throughput."
-            ),
-            -NUMERICAL_PARITY_MISSING_CONTEXT_PENALTY
-        );
-        assert_eq!(
-            numerical_parity_content_adjustment(query, "CUDA matrix multiplication throughput."),
-            -2.0 * NUMERICAL_PARITY_MISSING_CONTEXT_PENALTY
-        );
-        assert_eq!(
-            numerical_parity_content_adjustment(
-                "CPU and CUDA numerical parity for a fluid solver",
-                "unrelated"
-            ),
-            0.0
-        );
-    }
-
-    #[test]
-    fn numerical_parity_queries_reserve_a_concrete_cross_backend_issue() {
-        let raw = vec![
-            raw_with_title(
-                "https://overview.example/numerics",
-                "Cross-backend inference reproducibility",
-                "A broad overview of CPU and CUDA numerical drift.",
-            ),
-            raw_with_title(
-                "https://github.com/example/audio/issues/15",
-                "CPU bf16 causes divergent model output",
-                "CPU inference differs by precision; the loader also defaults to CUDA.",
-            ),
-            raw_with_title(
-                "https://github.com/example/runtime/issues/26027",
-                "CUDA inference produces subtly corrupted transformer output",
-                "CPU-only inference is correct, but the same model corrupts output on GPU.",
-            ),
-        ];
-        let chunks = one_chunk_per_document(&raw);
-        let query = "detect silent numerical drift porting machine-learning inference from CPU to CUDA bitwise reproducibility tolerance testing";
-
-        let selected = select_documents(
-            query,
-            &raw,
-            &chunks,
-            &[(0, 0.90), (1, 0.82), (2, 0.71)],
-            2,
-            &query_evidence(query, &raw),
-            &NumericConsensus::new(query, &raw),
-        )
-        .unwrap();
-
-        assert_eq!(selected, [0, 2]);
-    }
-
-    #[test]
     fn close_same_source_subjects_yield_to_an_independent_result() {
         let raw = vec![
             raw_with_title(
@@ -2251,7 +2044,6 @@ mod tests {
             &best,
             &exact,
             None,
-            None,
             false,
             false,
             &recommendations,
@@ -2295,7 +2087,6 @@ mod tests {
                 &best,
                 &[false; 3],
                 None,
-                None,
                 false,
                 false,
                 &recommendations,
@@ -2311,7 +2102,6 @@ mod tests {
                 &best,
                 &[false, true, false],
                 None,
-                None,
                 false,
                 false,
                 &recommendations,
@@ -2326,7 +2116,6 @@ mod tests {
                 &best,
                 &[false; 3],
                 Some(1),
-                None,
                 false,
                 false,
                 &recommendations,
