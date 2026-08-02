@@ -30,6 +30,16 @@ struct FetchFailureRecord<'a> {
     error: &'a str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResponseRecord<'a> {
+    query: &'a str,
+    target: &'a str,
+    result_count: usize,
+    contributors: &'a [&'a str],
+    unresponsive_engines: &'a [Vec<String>],
+}
+
 pub async fn capture(directory: Option<&Path>, url: &Url, html: &str, markdown: &str) {
     let Some(directory) = directory else {
         return;
@@ -46,6 +56,56 @@ pub async fn capture_fetch_failure(directory: Option<&Path>, url: &Url, failure:
     if let Err(error) = write_fetch_failure(directory, url, failure).await {
         tracing::debug!(url = %url, path = %directory.display(), error = ?error, "failed to write fetch diagnostics");
     }
+}
+
+pub async fn capture_search_response(
+    directory: Option<&Path>,
+    query: &str,
+    target: &str,
+    result_count: usize,
+    contributors: &[&str],
+    unresponsive_engines: &[Vec<String>],
+) {
+    let Some(directory) = directory else {
+        return;
+    };
+    if let Err(error) = write_search_response(
+        directory,
+        query,
+        target,
+        result_count,
+        contributors,
+        unresponsive_engines,
+    )
+    .await
+    {
+        tracing::debug!(query, target, path = %directory.display(), error = ?error, "failed to write search diagnostics");
+    }
+}
+
+async fn write_search_response(
+    directory: &Path,
+    query: &str,
+    target: &str,
+    result_count: usize,
+    contributors: &[&str],
+    unresponsive_engines: &[Vec<String>],
+) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(directory).await?;
+    let record = SearchResponseRecord {
+        query,
+        target,
+        result_count,
+        contributors,
+        unresponsive_engines,
+    };
+    let stem = text_hash(&format!("{target}\n{query}"));
+    tokio::fs::write(
+        directory.join(format!("{stem}.search.json")),
+        serde_json::to_vec_pretty(&record)?,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn write_fetch_failure(
@@ -102,7 +162,11 @@ async fn write_capture(
 }
 
 fn url_hash(url: &Url) -> String {
-    let digest = Sha256::digest(url.as_str().as_bytes());
+    text_hash(url.as_str())
+}
+
+fn text_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
     let mut hash = String::with_capacity(digest.len() * 2);
     for byte in digest {
         write!(hash, "{byte:02x}").expect("writing to a String cannot fail");
@@ -141,6 +205,40 @@ mod tests {
             .unwrap();
         assert!(metadata.contains("\"rawByteLength\": 13"));
         assert!(metadata.contains("\"extractedCharLength\": 5"));
+
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_search_engine_provenance() {
+        let directory =
+            std::env::temp_dir().join(format!("sift-search-debug-test-{}", std::process::id()));
+        let contributors = vec!["bing", "yep"];
+        let unresponsive = vec![vec!["brave".into(), "too many requests".into()]];
+        write_search_response(
+            &directory,
+            "rust error",
+            "categories:general",
+            24,
+            &contributors,
+            &unresponsive,
+        )
+        .await
+        .unwrap();
+
+        let stem = text_hash("categories:general\nrust error");
+        let metadata = tokio::fs::read(directory.join(format!("{stem}.search.json")))
+            .await
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(metadata["query"], "rust error");
+        assert_eq!(metadata["target"], "categories:general");
+        assert_eq!(metadata["resultCount"], 24);
+        assert_eq!(metadata["contributors"], serde_json::json!(["bing", "yep"]));
+        assert_eq!(
+            metadata["unresponsiveEngines"],
+            serde_json::json!([["brave", "too many requests"]])
+        );
 
         tokio::fs::remove_dir_all(directory).await.unwrap();
     }

@@ -1,0 +1,106 @@
+# Extended from SearXNG's default container template. The entrypoint replaces
+# ultrasecretkey with a random value when it initializes a new config volume.
+use_default_settings:
+  engines:
+    keep_only:
+      # General pool. SearXNG temporarily suspends an engine when its upstream
+      # rejects requests; keeping every engine eligible lets it recover without
+      # requiring a config change or container restart.
+      - bing
+      - yep
+      - brave
+      - duckduckgo web
+      - mojeek
+      - mwmbl
+      - startpage
+      # Coding verticals.
+      - arch linux wiki
+      - crates.io
+      - docker hub
+      - github
+      - lib.rs
+      - mdn
+      - nixos wiki
+      - npm
+      - pypi
+      # Research, news, and local discovery.
+      - arxiv
+      - openalex
+      - pubmed
+      - semantic scholar
+      - bing news
+      - google news
+      - reuters
+      - openstreetmap
+      - photon
+
+search:
+  # Inherit SearXNG's maintained, failure-specific engine cooldowns.
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "ultrasecretkey"
+  image_proxy: true
+  # Bundled SearXNG is reachable only from the private Compose network. Sift is
+  # the public boundary and paces/coalesces its upstream searches. SearXNG's
+  # inbound client limiter expects reverse-proxy IP headers that do not exist on
+  # this direct container-to-container hop.
+  limiter: false
+
+outgoing:
+  request_timeout: 3.0
+  max_request_timeout: 6.0
+
+engines:
+  - name: bing
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: duckduckgo web
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: arch linux wiki
+    disabled: false
+  - name: crates.io
+    disabled: false
+  - name: docker hub
+    disabled: false
+  - name: github
+    disabled: false
+  - name: lib.rs
+    disabled: false
+  - name: mdn
+    disabled: false
+  - name: nixos wiki
+    disabled: false
+  - name: npm
+    disabled: false
+  - name: pypi
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: openalex
+    disabled: false
+  - name: pubmed
+    disabled: false
+  - name: semantic scholar
+    disabled: false
+  - name: bing news
+    disabled: false
+  - name: google news
+    disabled: false
+  - name: reuters
+    disabled: false
+  - name: openstreetmap
+    disabled: false
+  - name: photon
+    disabled: false

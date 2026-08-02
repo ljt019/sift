@@ -6,8 +6,10 @@ use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::Instant;
 use url::Url;
+
+use super::{Hit, exact_identifier_query};
 
 const API_BASE: &str = "https://api.stackexchange.com/2.3";
 // Immutable filter created through /filters/create. It includes only the
@@ -18,6 +20,9 @@ const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CACHE_ENTRIES: usize = 256;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ANSWERS: usize = 10;
+const MAX_SEARCH_RESULTS: usize = 10;
+const SEARCH_BODY_CHARACTERS: usize = 400;
+const SEARCH_ANSWER_CHARACTERS: usize = 800;
 
 pub(crate) struct StackExchangeClient {
     http: Client,
@@ -58,6 +63,74 @@ impl StackExchangeClient {
                 next_request: Instant::now(),
             }),
         }
+    }
+
+    /// Searches Stack Overflow directly so discovery and answer retrieval use
+    /// one quota, one optional API key, and one backoff gate. SearXNG's three
+    /// separate Stack Exchange engines cannot share any of those controls.
+    pub async fn search(&self, query: &str, limit: usize) -> Vec<Hit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let query = exact_identifier_query(query).unwrap_or_else(|| query.to_owned());
+        match self
+            .search_questions(&query, limit.min(MAX_SEARCH_RESULTS))
+            .await
+        {
+            Ok(hits) => {
+                tracing::debug!(
+                    query,
+                    results = hits.len(),
+                    "received Stack Overflow candidates"
+                );
+                hits
+            }
+            Err(error) => {
+                tracing::debug!(error = ?error, "Stack Overflow search failed; continuing without direct candidates");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn search_questions(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        let _request_guard = self.request_gate.lock().await;
+        self.ensure_not_backed_off().await?;
+
+        let mut request = self
+            .http
+            .get(format!("{API_BASE}/search/advanced"))
+            .query(&[
+                ("q", query),
+                ("site", "stackoverflow"),
+                ("sort", "relevance"),
+                ("order", "desc"),
+                ("filter", API_FILTER),
+            ])
+            .query(&[("pagesize", limit)])
+            .timeout(REQUEST_TIMEOUT);
+        if let Some(api_key) = &self.api_key {
+            request = request.query(&[("key", api_key)]);
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("failed to search the Stack Exchange API")?;
+        let status = response.status();
+        let body = read_limited(response).await?;
+        if !status.is_success() {
+            self.record_api_error(status, &body).await?;
+        }
+        let response: ApiResponse =
+            serde_json::from_slice(&body).context("invalid Stack Exchange search response")?;
+        self.apply_response_limits(&response).await;
+
+        Ok(response
+            .items
+            .into_iter()
+            .filter_map(ApiQuestion::into_search_hit)
+            .take(limit)
+            .collect())
     }
 
     /// Fetches all recognized Stack Exchange questions in as few API calls as
@@ -139,10 +212,7 @@ impl StackExchangeClient {
             return Ok(());
         }
 
-        let next_request = self.state.lock().await.next_request;
-        if next_request > Instant::now() {
-            sleep_until(next_request).await;
-        }
+        self.ensure_not_backed_off().await?;
 
         let ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(";");
         let mut request = self
@@ -151,37 +221,24 @@ impl StackExchangeClient {
             .query(&[("site", site), ("filter", API_FILTER)])
             .timeout(REQUEST_TIMEOUT);
         if let Some(api_key) = &self.api_key {
-            request = request.bearer_auth(api_key);
+            request = request.query(&[("key", api_key)]);
         }
 
         let response = request
             .send()
             .await
-            .context("failed to call Stack Exchange API")?
-            .error_for_status()
-            .context("Stack Exchange API returned an error")?;
+            .context("failed to call Stack Exchange API")?;
+        let status = response.status();
         let body = read_limited(response).await?;
+        if !status.is_success() {
+            self.record_api_error(status, &body).await?;
+        }
         let mut response: ApiResponse =
             serde_json::from_slice(&body).context("invalid Stack Exchange API response")?;
 
         let now = Instant::now();
+        self.apply_response_limits(&response).await;
         let mut state = self.state.lock().await;
-        if let Some(backoff) = response.backoff {
-            state.next_request = now + Duration::from_secs(backoff);
-            tracing::warn!(
-                backoff_seconds = backoff,
-                "Stack Exchange API requested backoff"
-            );
-        }
-        if let Some(quota_remaining) = response.quota_remaining
-            && quota_remaining < 50
-        {
-            tracing::warn!(
-                quota_remaining,
-                quota_max = ?response.quota_max,
-                "Stack Exchange API quota is low"
-            );
-        }
 
         for mut question in response.items.drain(..) {
             let reference = QuestionRef {
@@ -211,6 +268,90 @@ impl StackExchangeClient {
         }
         Ok(())
     }
+
+    async fn ensure_not_backed_off(&self) -> Result<()> {
+        let now = Instant::now();
+        let next_request = self.state.lock().await.next_request;
+        if next_request > now {
+            bail!(
+                "Stack Exchange API is backed off for {} more seconds",
+                next_request.duration_since(now).as_secs()
+            );
+        }
+        Ok(())
+    }
+
+    async fn record_api_error(&self, status: reqwest::StatusCode, body: &[u8]) -> Result<()> {
+        let error = serde_json::from_slice::<ApiError>(body).ok();
+        if error
+            .as_ref()
+            .is_some_and(|error| error.error_name == "throttle_violation")
+        {
+            let retry_after = error
+                .as_ref()
+                .and_then(|error| retry_after_seconds(&error.error_message))
+                .unwrap_or(15 * 60);
+            self.state.lock().await.next_request =
+                Instant::now() + Duration::from_secs(retry_after);
+        }
+        let message = error
+            .map(|error| error.error_message)
+            .unwrap_or_else(|| "unknown API error".to_owned());
+        bail!("Stack Exchange API returned {status}: {message}")
+    }
+
+    async fn apply_response_limits(&self, response: &ApiResponse) {
+        if let Some(backoff) = response.backoff {
+            self.state.lock().await.next_request = Instant::now() + Duration::from_secs(backoff);
+            tracing::warn!(
+                backoff_seconds = backoff,
+                "Stack Exchange API requested backoff"
+            );
+        }
+        if let Some(quota_remaining) = response.quota_remaining
+            && quota_remaining < 50
+        {
+            tracing::warn!(
+                quota_remaining,
+                quota_max = ?response.quota_max,
+                "Stack Exchange API quota is low"
+            );
+        }
+    }
+}
+
+pub(super) fn printer_url(url: &Url) -> Option<Url> {
+    let question = question_ref(url)?;
+    let service = printer_service(url.host_str()?)?;
+    let mut printer = Url::parse("https://www.stackprinter.com/export").expect("valid literal");
+    printer
+        .query_pairs_mut()
+        .append_pair("question", &question.id.to_string())
+        .append_pair("service", &service)
+        .append_pair("language", "en")
+        .append_pair("hideAnswers", "false")
+        .append_pair("showAll", "true")
+        .append_pair("width", "640");
+    Some(printer)
+}
+
+pub(super) fn printer_unavailable(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("the stackexchange server is too busy")
+        || lower.contains("please try again later")
+        || lower.contains("too many requests")
+        || lower.contains("for the love it bears to fair maidens")
+        || lower.contains("stackprinter - the stack exchange printer suite")
+}
+
+fn retry_after_seconds(message: &str) -> Option<u64> {
+    message
+        .split_once("more requests available in ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub(super) fn recognizes(url: &Url) -> bool {
@@ -272,6 +413,29 @@ fn api_site(host: &str) -> Option<String> {
         _ => return None,
     };
     Some(site)
+}
+
+fn printer_service(host: &str) -> Option<String> {
+    let normalized = host.to_ascii_lowercase();
+    let host = normalized.strip_prefix("www.").unwrap_or(&normalized);
+
+    match host {
+        "stackoverflow.com" => Some("stackoverflow".into()),
+        "serverfault.com" => Some("serverfault".into()),
+        "superuser.com" => Some("superuser".into()),
+        "askubuntu.com" => Some("askubuntu".into()),
+        "mathoverflow.net" => Some("mathoverflow".into()),
+        "stackapps.com" => Some("stackapps".into()),
+        _ if host.ends_with(".stackexchange.com") => host
+            .strip_suffix(".com")
+            .filter(|service| !service.is_empty())
+            .map(str::to_owned),
+        _ if host.ends_with(".stackoverflow.com") => host
+            .strip_suffix(".com")
+            .filter(|service| !service.is_empty())
+            .map(str::to_owned),
+        _ => None,
+    }
 }
 
 fn render_question(question: &mut ApiQuestion) -> String {
@@ -359,6 +523,12 @@ struct ApiResponse {
 }
 
 #[derive(Deserialize)]
+struct ApiError {
+    error_name: String,
+    error_message: String,
+}
+
+#[derive(Deserialize)]
 struct ApiQuestion {
     question_id: u64,
     title: String,
@@ -367,10 +537,92 @@ struct ApiQuestion {
     link: String,
     #[serde(default)]
     score: i64,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    is_answered: bool,
     owner: Option<ApiUser>,
     content_license: Option<String>,
     #[serde(default)]
     answers: Vec<ApiAnswer>,
+}
+
+impl ApiQuestion {
+    fn into_search_hit(mut self) -> Option<Hit> {
+        let url = Url::parse(&self.link).ok()?;
+        self.answers.sort_by(|left, right| {
+            right
+                .is_accepted
+                .cmp(&left.is_accepted)
+                .then_with(|| right.score.cmp(&left.score))
+        });
+        let mut details = Vec::new();
+        if !self.tags.is_empty() {
+            details.push(self.tags.join(", "));
+        }
+        details.push(format!("score {}", self.score));
+        if self.is_answered {
+            details.push("answered".into());
+        }
+        let mut snippet = details.join(" · ");
+        let question_body = excerpt(&self.body_markdown, SEARCH_BODY_CHARACTERS);
+        if !question_body.is_empty() {
+            snippet.push_str("\n\n");
+            write_attribution(
+                &mut snippet,
+                "Question",
+                self.owner.as_ref(),
+                self.score,
+                &self.link,
+                self.content_license.as_deref(),
+            );
+            snippet.push_str(&question_body);
+        }
+        if let Some(answer) = self.answers.first() {
+            let answer_body = excerpt(&answer.body_markdown, SEARCH_ANSWER_CHARACTERS);
+            if !answer_body.is_empty() {
+                snippet.push_str("\n\n");
+                let kind = if answer.is_accepted {
+                    "Accepted answer"
+                } else {
+                    "Answer"
+                };
+                write_attribution(
+                    &mut snippet,
+                    kind,
+                    answer.owner.as_ref(),
+                    answer.score,
+                    &answer.share_link,
+                    answer.content_license.as_deref(),
+                );
+                snippet.push_str(&answer_body);
+            }
+        }
+        Some(Hit {
+            title: decode_title(&self.title),
+            url,
+            date: None,
+            snippet,
+        })
+    }
+}
+
+fn excerpt(markdown: &str, max_characters: usize) -> String {
+    let trimmed = markdown.trim();
+    let mut excerpt = trimmed.chars().take(max_characters).collect::<String>();
+    if trimmed.chars().count() > max_characters {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+fn decode_title(title: &str) -> String {
+    title
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 #[derive(Deserialize)]
@@ -424,6 +676,31 @@ mod tests {
         assert!(
             question_ref(&Url::parse("https://example.com/questions/1/nope").unwrap()).is_none()
         );
+
+        let printer = printer_url(
+            &Url::parse("https://unix.stackexchange.com/questions/67890/example").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(printer.host_str(), Some("www.stackprinter.com"));
+        assert!(printer.as_str().contains("question=67890"));
+        assert!(printer.as_str().contains("service=unix.stackexchange"));
+    }
+
+    #[test]
+    fn recognizes_stackprinter_failures_and_api_retry_windows() {
+        assert!(printer_unavailable(
+            "The StackExchange server is too busy at the moment. Please try again later."
+        ));
+        assert!(printer_unavailable(
+            "..for the love it bears to fair maidens forgets its ferocity and wildness.. too many requests from this app/user pair"
+        ));
+        assert!(!printer_unavailable("# Useful question\n\nAccepted answer"));
+        assert_eq!(
+            retry_after_seconds(
+                "too many requests from this IP, more requests available in 47924 seconds"
+            ),
+            Some(47_924)
+        );
     }
 
     #[test]
@@ -467,5 +744,84 @@ mod tests {
         assert!(markdown.contains("CC BY-SA 4.0"));
         assert!(markdown.contains("Accepted \\[Author\\]"));
         assert!(markdown.find("Accepted answer").unwrap() < markdown.find("Lower answer").unwrap());
+    }
+
+    #[test]
+    fn turns_search_metadata_into_a_candidate_without_claiming_a_date() {
+        let response: ApiResponse = serde_json::from_str(
+            r#"{
+                "items": [{
+                    "question_id": 42,
+                    "title": "Rust &quot;FromResidual&quot; error",
+                    "link": "https://stackoverflow.com/questions/42/example",
+                    "score": 12,
+                    "tags": ["rust", "error-handling"],
+                    "is_answered": true
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let hit = response
+            .items
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_search_hit()
+            .unwrap();
+
+        assert_eq!(hit.title, "Rust \"FromResidual\" error");
+        assert_eq!(
+            hit.url.as_str(),
+            "https://stackoverflow.com/questions/42/example"
+        );
+        assert_eq!(hit.snippet, "rust, error-handling · score 12 · answered");
+        assert_eq!(hit.date, None);
+    }
+
+    #[test]
+    fn search_candidates_include_an_attributed_answer_excerpt() {
+        let response: ApiResponse = serde_json::from_str(
+            r#"{
+                "items": [{
+                    "question_id": 42,
+                    "title": "Convert a source error into my enum",
+                    "body_markdown": "Why does the question mark operator reject my source error?",
+                    "link": "https://stackoverflow.com/questions/42/example",
+                    "score": 4,
+                    "owner": {"display_name": "Questioner", "link": "https://stackoverflow.com/users/1"},
+                    "content_license": "CC BY-SA 4.0",
+                    "answers": [{
+                        "answer_id": 7,
+                        "body_markdown": "Implement From&lt;SourceError&gt; for your custom error enum.",
+                        "score": 9,
+                        "is_accepted": true,
+                        "share_link": "https://stackoverflow.com/a/7",
+                        "owner": {"display_name": "Answerer", "link": "https://stackoverflow.com/users/2"},
+                        "content_license": "CC BY-SA 4.0"
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let hit = response
+            .items
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_search_hit()
+            .unwrap();
+
+        assert!(
+            hit.snippet
+                .contains("[Questioner](https://stackoverflow.com/users/1)")
+        );
+        assert!(
+            hit.snippet
+                .contains("[Answerer](https://stackoverflow.com/users/2)")
+        );
+        assert!(hit.snippet.contains("From&lt;SourceError&gt;"));
+        assert!(hit.snippet.contains("CC BY-SA 4.0"));
     }
 }

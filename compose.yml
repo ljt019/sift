@@ -14,10 +14,10 @@ services:
     environment:
       BIND: 0.0.0.0:8099
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
-      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES:-general,it,science,news}
+      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES:-general,it,science,news,map}
       SEARXNG_TIMEOUT_SECS: ${SEARXNG_TIMEOUT_SECS:-25}
       SEARXNG_CONCURRENCY: ${SEARXNG_CONCURRENCY:-2}
-      SEARXNG_MIN_INTERVAL_MS: ${SEARXNG_MIN_INTERVAL_MS:-1000}
+      SEARXNG_MIN_INTERVAL_MS: ${SEARXNG_MIN_INTERVAL_MS:-10000}
       EMBEDDING_ENABLED: ${EMBEDDING_ENABLED:-true}
       EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cuda}
       HF_TOKEN: ${HF_TOKEN:-}
@@ -48,13 +48,15 @@ services:
       - sift-network
 
   searxng:
-    image: docker.io/searxng/searxng:latest
+    image: docker.io/searxng/searxng:2026.8.1-8892414dc
     restart: unless-stopped
     profiles: [bundled]
 
     volumes:
-      - /var/lib/searxng/core-config:/etc/searxng:rw
       - /var/lib/searxng/cache:/var/cache/searxng:rw
+      - ./searxng-settings.yml:/usr/local/searxng/settings.template.yml:ro
+    tmpfs:
+      - /etc/searxng
 
     environment:
       SEARXNG_VALKEY_URL: valkey://valkey:6379/0

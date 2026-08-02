@@ -66,53 +66,71 @@ pub fn assemble(text: &str, chunks: &[&Chunk]) -> Assembled {
         };
     }
 
+    // `chunks` arrives in relevance order. Keep that priority when disjoint
+    // passages are assembled so an answer later in the source is not placed
+    // behind weaker introductory text and then clipped by the response budget.
     let mut ranges = chunks
         .iter()
-        .map(|chunk| (chunk.start, chunk.end))
+        .enumerate()
+        .map(|(priority, chunk)| (chunk.start, chunk.end, priority))
         .collect::<Vec<_>>();
-    ranges.sort_unstable();
+    ranges.sort_unstable_by_key(|(start, _, _)| *start);
 
-    let mut merged = Vec::with_capacity(ranges.len());
-    for (start, end) in ranges {
+    let mut merged = Vec::<(usize, usize, usize)>::with_capacity(ranges.len());
+    for (start, end, priority) in ranges {
         match merged.last_mut() {
-            Some((_, previous_end)) if start <= *previous_end => {
+            Some((_, previous_end, previous_priority)) if start <= *previous_end => {
                 *previous_end = (*previous_end).max(end);
+                *previous_priority = (*previous_priority).min(priority);
             }
-            _ => merged.push((start, end)),
+            _ => merged.push((start, end, priority)),
         }
     }
 
-    let ranges = merged
+    let mut ranges = merged
         .into_iter()
-        .map(|(start, end)| {
+        .map(|(start, end, priority)| {
             let (start, end) = clean_bounds(text, start, end);
-            (start, end)
+            (start, end, priority)
         })
-        .filter(|(start, end)| start < end)
-        .fold(Vec::<(usize, usize)>::new(), |mut ranges, (start, end)| {
-            match ranges.last_mut() {
-                Some((_, previous_end)) if !contains_text(&text[*previous_end..start]) => {
-                    *previous_end = end;
+        .filter(|(start, end, _)| start < end)
+        .fold(
+            Vec::<(usize, usize, usize)>::new(),
+            |mut ranges, (start, end, priority)| {
+                match ranges.last_mut() {
+                    Some((_, previous_end, previous_priority))
+                        if !contains_text(&text[*previous_end..start]) =>
+                    {
+                        *previous_end = end;
+                        *previous_priority = (*previous_priority).min(priority);
+                    }
+                    _ => ranges.push((start, end, priority)),
                 }
-                _ => ranges.push((start, end)),
-            }
-            ranges
-        });
+                ranges
+            },
+        );
 
-    let Some(&(first_start, _)) = ranges.first() else {
+    let Some(&(source_first_start, _, _)) = ranges.first() else {
         return Assembled {
             content: String::new(),
             truncated: contains_text(text),
         };
     };
-    let last_end = ranges.last().expect("ranges is not empty").1;
-    let omitted_prefix = contains_text(&text[..first_start]);
-    let omitted_suffix = contains_text(&text[last_end..]);
+    let source_last_end = ranges.last().expect("ranges is not empty").1;
+    let truncated = contains_text(&text[..source_first_start])
+        || ranges
+            .windows(2)
+            .any(|pair| contains_text(&text[pair[0].1..pair[1].0]))
+        || contains_text(&text[source_last_end..]);
+    let omitted_prefix = contains_text(&text[..source_first_start]);
+    let omitted_suffix = contains_text(&text[source_last_end..]);
+
+    ranges.sort_unstable_by_key(|(start, _, priority)| (*priority, *start));
     let mut sections = Vec::with_capacity(ranges.len() * 2 + 2);
     if omitted_prefix {
         sections.push("…".to_owned());
     }
-    for (index, &(start, end)) in ranges.iter().enumerate() {
+    for (index, &(start, end, _)) in ranges.iter().enumerate() {
         if index > 0 {
             sections.push("…".to_owned());
         }
@@ -124,7 +142,7 @@ pub fn assemble(text: &str, chunks: &[&Chunk]) -> Assembled {
 
     Assembled {
         content: sections.join("\n\n"),
-        truncated: omitted_prefix || ranges.len() > 1 || omitted_suffix,
+        truncated,
     }
 }
 
@@ -265,6 +283,26 @@ mod tests {
         let assembled = assemble(text, &[&chunks[0]]);
 
         assert_eq!(assembled.content, "…\n\nmiddle\n\n…");
+        assert!(assembled.truncated);
+    }
+
+    #[test]
+    fn puts_the_most_relevant_disjoint_passage_first() {
+        let text = "weak introduction omitted answer-bearing recommendation omitted appendix";
+        let spans = [span(text, 0, 17, 3), span(text, 26, 55, 3)];
+        let chunks = split(0, text, &spans).unwrap();
+
+        let assembled = assemble(text, &[&chunks[1], &chunks[0]]);
+
+        assert!(
+            assembled
+                .content
+                .starts_with("answer-bearing recommendation")
+        );
+        assert!(
+            assembled.content.find("answer-bearing").unwrap()
+                < assembled.content.find("weak introduction").unwrap()
+        );
         assert!(assembled.truncated);
     }
 

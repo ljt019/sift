@@ -91,12 +91,15 @@ impl Config {
             bind: var("BIND", "0.0.0.0:8099".parse().expect("valid literal"))?,
             searxng_url,
             searxng_timeout: secs("SEARXNG_TIMEOUT_SECS", 25)?,
-            searxng_categories: var("SEARXNG_CATEGORIES", "general,it,science,news".to_owned())?,
+            searxng_categories: var(
+                "SEARXNG_CATEGORIES",
+                "general,it,science,news,map".to_owned(),
+            )?,
             searxng_concurrency: var(
                 "SEARXNG_CONCURRENCY",
                 NonZeroUsize::new(2).expect("non-zero literal"),
             )?,
-            searxng_min_interval: Duration::from_millis(var("SEARXNG_MIN_INTERVAL_MS", 1_000)?),
+            searxng_min_interval: Duration::from_millis(var("SEARXNG_MIN_INTERVAL_MS", 10_000)?),
             stackexchange_key: optional_var("STACKEXCHANGE_KEY").map(StackExchangeKey),
             sift_debug_dir: std::env::var_os("SIFT_DEBUG_DIR")
                 .filter(|path| !path.is_empty())

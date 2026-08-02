@@ -26,6 +26,19 @@ const DIAGNOSTIC_HEADERS: &[&str] = &[
     "x-vercel-id",
 ];
 
+pub(super) enum Page {
+    Html(String),
+    Text(String),
+    Pdf(Vec<u8>),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PageKind {
+    Html,
+    Text,
+    Pdf,
+}
+
 #[derive(Debug)]
 pub struct FetchError {
     source: anyhow::Error,
@@ -115,7 +128,7 @@ impl Resolve for PublicDnsResolver {
     }
 }
 
-pub async fn get(state: &AppState, url: &Url) -> std::result::Result<String, FetchError> {
+pub async fn get(state: &AppState, url: &Url) -> std::result::Result<Page, FetchError> {
     let _permit = state
         .fetch_permits
         .acquire()
@@ -132,7 +145,7 @@ pub async fn get(state: &AppState, url: &Url) -> std::result::Result<String, Fet
     }
 }
 
-async fn get_with_redirects(state: &AppState, url: &Url) -> Result<String> {
+async fn get_with_redirects(state: &AppState, url: &Url) -> Result<Page> {
     let mut current = url.clone();
     let mut redirects = 0;
     let mut spoof_browser = true;
@@ -171,9 +184,10 @@ async fn get_with_redirects(state: &AppState, url: &Url) -> Result<String> {
                 .context("redirect response omitted Location")?
                 .to_str()
                 .context("redirect Location is not valid ASCII")?;
-            current = current
+            let target = current
                 .join(location)
                 .with_context(|| format!("invalid redirect target {location:?}"))?;
+            current = target;
             redirects += 1;
             continue;
         }
@@ -196,7 +210,7 @@ async fn get_with_redirects(state: &AppState, url: &Url) -> Result<String> {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let diagnostic_headers = diagnostic_headers(response.headers());
-        ensure_supported_content_type(content_type.as_deref())?;
+        let kind = content_kind(content_type.as_deref())?;
 
         let mut body = Vec::with_capacity(
             response
@@ -206,6 +220,10 @@ async fn get_with_redirects(state: &AppState, url: &Url) -> Result<String> {
         );
         while let Some(chunk) = response.chunk().await.context("failed to read page body")? {
             append_limited(&mut body, &chunk, MAX_BODY_BYTES)?;
+        }
+
+        if matches!(kind, PageKind::Pdf) {
+            return Ok(Page::Pdf(body));
         }
 
         let body = decode(&body, content_type.as_deref());
@@ -224,7 +242,11 @@ async fn get_with_redirects(state: &AppState, url: &Url) -> Result<String> {
                 diagnostic,
             }));
         }
-        return Ok(body);
+        return Ok(match kind {
+            PageKind::Html => Page::Html(body),
+            PageKind::Text => Page::Text(body),
+            PageKind::Pdf => unreachable!("PDF responses return before text decoding"),
+        });
     }
 }
 
@@ -320,17 +342,15 @@ fn append_limited(body: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<()> 
     Ok(())
 }
 
-fn ensure_supported_content_type(content_type: Option<&str>) -> Result<()> {
+fn content_kind(content_type: Option<&str>) -> Result<PageKind> {
     let Some(media_type) = content_type.and_then(|value| value.split(';').next()) else {
-        return Ok(());
+        return Ok(PageKind::Html);
     };
-    if matches!(
-        media_type.trim().to_ascii_lowercase().as_str(),
-        "text/html" | "application/xhtml+xml" | "text/plain"
-    ) {
-        Ok(())
-    } else {
-        bail!("unsupported page content type {media_type:?}")
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "text/html" | "application/xhtml+xml" => Ok(PageKind::Html),
+        "text/plain" | "text/markdown" | "text/x-markdown" => Ok(PageKind::Text),
+        "application/pdf" => Ok(PageKind::Pdf),
+        _ => bail!("unsupported page content type {media_type:?}"),
     }
 }
 
@@ -471,9 +491,24 @@ mod tests {
 
     #[test]
     fn validates_content_types() {
-        assert!(ensure_supported_content_type(None).is_ok());
-        assert!(ensure_supported_content_type(Some("text/html; charset=utf-8")).is_ok());
-        assert!(ensure_supported_content_type(Some("application/pdf")).is_err());
+        assert!(matches!(content_kind(None), Ok(PageKind::Html)));
+        assert!(matches!(
+            content_kind(Some("text/html; charset=utf-8")),
+            Ok(PageKind::Html)
+        ));
+        assert!(matches!(
+            content_kind(Some("text/markdown; charset=utf-8")),
+            Ok(PageKind::Text)
+        ));
+        assert!(matches!(
+            content_kind(Some("text/plain")),
+            Ok(PageKind::Text)
+        ));
+        assert!(matches!(
+            content_kind(Some("application/pdf")),
+            Ok(PageKind::Pdf)
+        ));
+        assert!(content_kind(Some("application/octet-stream")).is_err());
     }
 
     #[test]
