@@ -45,9 +45,21 @@ curl http://localhost:8099/search \
 
 Health is available at `GET /health`.
 
-## Performance 
+## Performance
 
-<--Performance Matrix Here-->
+Warm EmbeddingGemma document embedding at 768 dimensions, using mixed-length
+inputs and production batching. Rows are batch sizes; values are mean latency over five runs after warmup. Model loading is excluded.
+
+| Batch size | CPU | RTX 3060 |
+| ---: | ---: | ---: |
+| 1 | 90.5 ms | 11.8 ms |
+| 2 | 107.9 ms | 12.9 ms |
+| 4 | 126.8 ms | 15.8 ms |
+| 8 | 234.3 ms | 35.7 ms |
+| 16 | 373.8 ms | 62.1 ms |
+| 32 | 675.1 ms | 114.1 ms |
+
+Measured with Rust 1.95.0 and CUDA 12.9.1. Search latency also includes SearXNG, page fetching, extraction, and tokenization.
 
 ## License
 
